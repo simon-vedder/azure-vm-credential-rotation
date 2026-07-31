@@ -1,0 +1,32 @@
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+.terraform.lock.hcl
+
+# PowerShell
+*.psproj
+TestResults*.xml
+coverage*.xml
+
+# Editors and OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Never commit key material, even from a test run
+*.pem
+*.key
+id_rsa*
+*.ppk

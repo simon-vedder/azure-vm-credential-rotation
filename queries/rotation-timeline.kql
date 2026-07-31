@@ -1,0 +1,29 @@
+// Exposure windows: how long a credential stayed valid after somebody read it.
+//
+// This is the number the project exists to shrink. Each row is one human read,
+// matched against the next rotation of that secret.
+//
+// Rows with a null RotatedAt are still live. Inside the grace period that is expected;
+// well beyond it, something is stuck - check whether the VM is powered off.
+
+let reads =
+    AZKVAuditLogs
+    | where OperationName == "SecretGet" and ResultType == "Success"
+    | extend Upn = tostring(Identity.claim.upn)
+    | where isnotempty(Upn)
+    | extend SecretName = tostring(split(tostring(parse_url(RequestUri).Path), "/")[2])
+    | where isnotempty(SecretName) and SecretName !endswith "-pending"
+    | project ReadAt = TimeGenerated, SecretName, ReadBy = Upn;
+let rotations =
+    CredentialRotation_CL
+    | where Result == "Rotated"
+    | project RotatedAt = TimeGenerated, SecretName, VMName, TriggerReason;
+reads
+| join kind=leftouter rotations on SecretName
+| where isnull(RotatedAt) or RotatedAt > ReadAt
+| summarize RotatedAt = min(RotatedAt), VMName = any(VMName), TriggerReason = any(TriggerReason)
+    by SecretName, ReadBy, ReadAt
+| extend ExposureHours = round(toreal(datetime_diff("minute", coalesce(RotatedAt, now()), ReadAt)) / 60.0, 1)
+| extend Status = iff(isnull(RotatedAt), "not yet rotated", "rotated")
+| project ReadAt, SecretName, VMName, ReadBy, RotatedAt, ExposureHours, Status, TriggerReason
+| order by ReadAt desc

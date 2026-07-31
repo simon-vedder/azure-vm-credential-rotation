@@ -1,0 +1,162 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 1,
+      "content": {
+        "json": "## Credential access and rotation\n\nWho read a credential, when it was replaced, and how long it stayed valid in between.\n\nReads come from the Key Vault audit log. Rotations come from the runbook. The exposure window is the gap between the two — that is the number this whole project exists to shrink."
+      },
+      "name": "header"
+    },
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "1b6cf4e0-3a2d-4c8f-9e11-7d5a2b8c4f60",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Time range",
+            "type": 4,
+            "isRequired": true,
+            "value": { "durationMs": 604800000 },
+            "typeSettings": {
+              "selectableValues": [
+                { "durationMs": 86400000 },
+                { "durationMs": 604800000 },
+                { "durationMs": 2592000000 },
+                { "durationMs": 7776000000 }
+              ]
+            }
+          }
+        ],
+        "style": "pills",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "parameters"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "### Exposure windows\n\nEach row is one human read of a credential. `ExposureHours` is how long that credential stayed valid afterwards. Rows marked *not yet rotated* are still live — expected within the grace period, worth a look beyond it."
+      },
+      "name": "exposure-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let reads = AZKVAuditLogs\n| where OperationName == 'SecretGet' and ResultType == 'Success'\n| extend Upn = tostring(Identity.claim.upn)\n| where isnotempty(Upn)\n| extend SecretName = tostring(split(tostring(parse_url(RequestUri).Path), '/')[2])\n| where isnotempty(SecretName) and SecretName !endswith '-pending'\n| project ReadAt = TimeGenerated, SecretName, ReadBy = Upn;\nlet rotations = CredentialRotation_CL\n| where Result == 'Rotated'\n| project RotatedAt = TimeGenerated, SecretName, VMName, TriggerReason;\nreads\n| join kind=leftouter rotations on SecretName\n| where isnull(RotatedAt) or RotatedAt > ReadAt\n| summarize RotatedAt = min(RotatedAt), VMName = any(VMName), TriggerReason = any(TriggerReason) by SecretName, ReadBy, ReadAt\n| extend ExposureHours = round(toreal(datetime_diff('minute', coalesce(RotatedAt, now()), ReadAt)) / 60.0, 1)\n| extend Status = iff(isnull(RotatedAt), 'not yet rotated', 'rotated')\n| project ReadAt, SecretName, VMName, ReadBy, RotatedAt, ExposureHours, Status, TriggerReason\n| order by ReadAt desc",
+        "size": 0,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["${workspace_id}"],
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "ExposureHours",
+              "formatter": 8,
+              "formatOptions": {
+                "palette": "redGreen",
+                "compositeBarSettings": { "labelText": "" }
+              }
+            },
+            {
+              "columnMatch": "Status",
+              "formatter": 18,
+              "formatOptions": {
+                "thresholdsOptions": "icons",
+                "thresholdsGrid": [
+                  { "operator": "==", "thresholdValue": "not yet rotated", "representation": "pending" },
+                  { "operator": "Default", "representation": "success" }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "name": "exposure-windows"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "### Rotation activity"
+      },
+      "name": "activity-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "CredentialRotation_CL\n| summarize Count = count() by bin(TimeGenerated, 6h), Result\n| order by TimeGenerated asc",
+        "size": 1,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["${workspace_id}"],
+        "visualization": "barchart",
+        "chartSettings": { "showLegend": true }
+      },
+      "customWidth": "50",
+      "name": "activity-chart"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "CredentialRotation_CL\n| summarize Rotations = countif(Result == 'Rotated'), Skipped = countif(Result == 'Skipped'), Failed = countif(Result == 'Failed'), LastRun = max(TimeGenerated) by TriggerReason\n| order by Rotations desc",
+        "size": 1,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["${workspace_id}"],
+        "visualization": "table"
+      },
+      "customWidth": "50",
+      "name": "activity-by-reason"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "### Failures and machines that keep being skipped\n\nA VM that is powered off is skipped on purpose and retried next run. A VM that has been skipped for days is a VM whose credential is drifting towards its expiry date without anyone noticing."
+      },
+      "name": "problems-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "CredentialRotation_CL\n| where Result in ('Failed', 'Skipped')\n| summarize Attempts = count(), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated), LastDetail = arg_max(TimeGenerated, Detail) by VMName, SecretName, CredentialType, Result\n| extend StuckForHours = round(toreal(datetime_diff('minute', LastSeen, FirstSeen)) / 60.0, 1)\n| project VMName, SecretName, CredentialType, Result, Attempts, StuckForHours, LastSeen, Detail = LastDetail_Detail\n| order by StuckForHours desc, Attempts desc",
+        "size": 0,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["${workspace_id}"],
+        "visualization": "table"
+      },
+      "name": "problems"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "### Every read, including applications\n\nThe rotation logic ignores reads without a upn claim, because rotating a credential out from under a running workload breaks it. They are still worth seeing: an application reading a VM administrator password is worth a question."
+      },
+      "name": "all-reads-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AZKVAuditLogs\n| where OperationName == 'SecretGet'\n| extend SecretName = tostring(split(tostring(parse_url(RequestUri).Path), '/')[2])\n| extend Caller = coalesce(tostring(Identity.claim.upn), strcat('app:', tostring(Identity.claim.appid)))\n| extend Kind = iff(isnotempty(tostring(Identity.claim.upn)), 'user', 'application')\n| summarize Reads = count(), LastRead = max(TimeGenerated) by Caller, Kind, SecretName, CallerIPAddress, ResultType\n| order by LastRead desc",
+        "size": 0,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["${workspace_id}"],
+        "visualization": "table"
+      },
+      "name": "all-reads"
+    }
+  ],
+  "fallbackResourceIds": ["${workspace_id}"],
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+}

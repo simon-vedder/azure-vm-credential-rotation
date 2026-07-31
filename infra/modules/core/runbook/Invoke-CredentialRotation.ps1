@@ -1,0 +1,1582 @@
+<#
+    GENERATED FILE - DO NOT EDIT
+
+    Built from src/ by build/Build-Runbook.ps1.
+    Edit the module under src/CredentialRotation or the wrapper under src/runbooks,
+    then rebuild and commit the result.
+
+    Module version: 0.1.0
+#>
+
+#Requires -Version 7.2
+<#
+.SYNOPSIS
+    Azure Automation entry point for VM credential rotation.
+
+.DESCRIPTION
+    Thin wrapper. It authenticates, resolves configuration, guards against
+    overlapping runs and calls Invoke-CredentialRotation. All logic lives in the
+    CredentialRotation module under src/, which is flattened into this file by
+    build/Build-Runbook.ps1 - Azure Automation runs a single script per job and
+    cannot import a module that is not published to a gallery.
+
+    Configuration precedence is parameter, then Automation variable, then default.
+    That is what makes the Terraform modules independently deployable: the
+    observability module sets CR_WorkspaceId and the data collection variables, the
+    rotate-on-access module sets CR_AccessRotationEnabled. Deploy neither and the
+    runbook falls back to plain expiry-driven rotation.
+
+.PARAMETER DryRun
+    Runs the whole pass under -WhatIf. Use this first, always.
+
+.NOTES
+    Requires the automation account's managed identity to hold:
+      Key Vault Secrets Officer   on the vault
+      Virtual Machine Contributor on the VM scopes
+      Log Analytics Reader        on the workspace   (only for access-driven rotation)
+      Monitoring Metrics Publisher on the DCR        (only for audit records)
+#>
+[CmdletBinding()]
+param(
+    [string]$VaultName,
+    [string]$SubscriptionId,
+
+    [int]$ThresholdDays = 0,
+    [int]$ValidityDays = 0,
+
+    [string]$EnableTagName,
+    [string]$EnableTagValue,
+
+    [bool]$SkipSshKeys = $false,
+    [bool]$RemovePriorSshKeys = $false,
+    [bool]$ResetSshConfiguration = $false,
+
+    [bool]$DryRun = $false
+)
+
+#region Private
+
+# --- Private/Get-AccessedSecret.ps1 ---------------------------------
+function Get-AccessedSecret {
+    <#
+    .SYNOPSIS
+        Returns secrets whose value was read by a human since a given point in time.
+
+    .DESCRIPTION
+        This is the whole access-triggered rotation mechanism. No Event Grid, no
+        alert rule, no webhook: the run asks Log Analytics who read what, and acts
+        on the answer.
+
+        "Human" is approximated by the presence of an upn claim. Service principals
+        and managed identities authenticate with an appid and no upn, so an
+        application reading its own secret does not trigger a rotation - which is
+        the desired behaviour, since rotating under a running workload breaks it.
+
+        Two caveats worth knowing before you rely on this:
+
+        - Log Analytics ingestion is not instant. Several minutes is normal. The
+          LookbackHours window should comfortably exceed the schedule interval so a
+          delayed record is never missed; overlapping windows are harmless because
+          bringing an expiry date forward is idempotent.
+
+        - Column names differ between the resource-specific table (AZKVAuditLogs)
+          and the legacy AzureDiagnostics table. This function targets the former,
+          which is what the observability module configures. Verify the query in
+          your own workspace before trusting it - see queries/accessed-secrets.kql.
+
+    .OUTPUTS
+        PSCustomObject with SecretName, LastAccessedAt, AccessedBy, AccessCount.
+    #>
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][string]$WorkspaceId,
+        [Parameter(Mandatory)][string]$VaultName,
+
+        [ValidateRange(1, 720)]
+        [int]$LookbackHours = 24,
+
+        # Object IDs never counted as human access, typically the automation
+        # account's own managed identity.
+        [string[]]$ExcludeObjectId = @()
+    )
+
+    $excludeClause = ''
+    if ($ExcludeObjectId.Count -gt 0) {
+        $list = ($ExcludeObjectId | ForEach-Object { "'$($_ -replace "'", '')'" }) -join ', '
+        $excludeClause = "| where tostring(Identity.claim.oid) !in ($list)"
+    }
+
+    $query = @"
+AZKVAuditLogs
+| where TimeGenerated > ago(${LookbackHours}h)
+| where OperationName == 'SecretGet'
+| where ResultType == 'Success'
+| where tolower(tostring(split(_ResourceId, '/')[-1])) == tolower('$VaultName')
+| extend Upn = tostring(Identity.claim.upn)
+| where isnotempty(Upn)
+$excludeClause
+| extend SecretName = tostring(split(tostring(parse_url(RequestUri).Path), '/')[2])
+| where isnotempty(SecretName)
+| summarize LastAccessedAt = max(TimeGenerated), AccessCount = count() by SecretName, Upn
+| project SecretName, LastAccessedAt, AccessedBy = Upn, AccessCount
+"@
+
+    Write-RotationLog -Message "Querying workspace for secret reads in the last $LookbackHours hours" -Level Info -Scope 'access'
+
+    $response = Invoke-AzOperationalInsightsQuery -WorkspaceId $WorkspaceId -Query $query -ErrorAction Stop
+
+    if (-not $response.Results) { return @() }
+
+    return @($response.Results | ForEach-Object {
+        [pscustomobject]@{
+            SecretName     = $_.SecretName
+            LastAccessedAt = [datetime]::Parse($_.LastAccessedAt).ToUniversalTime()
+            AccessedBy     = $_.AccessedBy
+            AccessCount    = [int]$_.AccessCount
+        }
+    })
+}
+
+# --- Private/Get-RotationSecret.ps1 ---------------------------------
+function Get-RotationSecret {
+    <#
+    .SYNOPSIS
+        Reads secret metadata, distinguishing "does not exist" from "cannot read".
+
+    .DESCRIPTION
+        This distinction is the single most important piece of error handling in the
+        project. Get-AzKeyVaultSecret returns $null when a secret is absent and
+        throws when the call itself fails - a denied role assignment, throttling, a
+        firewall, a transient network fault.
+
+        Treating both as "no secret, therefore rotate" is how you end up changing a
+        VM password and then failing to store it. This function returns Exists=$false
+        only for a genuine absence and rethrows everything else, so a permissions
+        problem surfaces as a failure instead of a rotation.
+
+        Note that -IncludeVersions is not used: metadata is enough to decide, and not
+        reading the value keeps this call out of the SecretGet audit trail that the
+        access-triggered rotation depends on.
+
+    .OUTPUTS
+        PSCustomObject with Exists (bool) and Secret (the Key Vault secret, or $null).
+    #>
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][string]$VaultName,
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    try {
+        $secret = Get-AzKeyVaultSecret -VaultName $VaultName -Name $Name -ErrorAction Stop
+
+        return [pscustomobject]@{
+            Exists = $null -ne $secret
+            Secret = $secret
+        }
+    }
+    catch {
+        # Az surfaces a missing secret as $null, but be explicit in case a future
+        # version starts throwing: only a genuine 404 counts as absent.
+        $isNotFound = $_.Exception.Message -match 'SecretNotFound' -or
+                      $_.Exception.Response.StatusCode -eq 404
+
+        if ($isNotFound) {
+            return [pscustomobject]@{ Exists = $false; Secret = $null }
+        }
+
+        throw "Cannot read secret metadata '$Name' from vault '$VaultName'. Refusing to treat this as a missing secret. $($_.Exception.Message)"
+    }
+}
+
+# --- Private/New-RotationPassword.ps1 -------------------------------
+function New-RotationPassword {
+    <#
+    .SYNOPSIS
+        Generates a random password with a uniform character distribution.
+
+    .DESCRIPTION
+        Uses rejection sampling instead of a plain modulo over random bytes. A modulo
+        maps 256 byte values onto an alphabet that does not divide 256 evenly, which
+        makes the first few characters of the alphabet slightly more likely. The bias
+        is small, but it is free to avoid and it is the first thing a reader checks.
+
+        Complexity is satisfied by drawing at least one character from each required
+        class and shuffling, rather than by inserting known characters at fixed
+        positions.
+
+        Excluded from the alphabet: quote, backslash, backtick, dollar and space.
+        Those survive badly through ARM templates, JSON payloads and shells, and the
+        VMAccess extension passes the value through several of them.
+
+    .OUTPUTS
+        System.Security.SecureString
+    #>
+    [CmdletBinding()]
+    [OutputType([securestring])]
+    param(
+        [ValidateRange(12, 123)]
+        [int]$Length = 24
+    )
+
+    $classes = @(
+        'abcdefghijkmnopqrstuvwxyz'      # no l
+        'ABCDEFGHJKLMNPQRSTUVWXYZ'       # no I, no O
+        '23456789'                       # no 0, no 1
+        '!#%&()*+,-./:;<=>?@[]^_{|}~'
+    )
+    $alphabet = -join $classes
+
+    $chars = [System.Collections.Generic.List[char]]::new()
+
+    # One character from each class guarantees complexity without a fixed position.
+    foreach ($class in $classes) {
+        $chars.Add((Get-UniformChar -Alphabet $class))
+    }
+    while ($chars.Count -lt $Length) {
+        $chars.Add((Get-UniformChar -Alphabet $alphabet))
+    }
+
+    # Fisher-Yates with a cryptographic source, so the guaranteed characters do not
+    # sit at predictable offsets.
+    for ($i = $chars.Count - 1; $i -gt 0; $i--) {
+        $j = [System.Security.Cryptography.RandomNumberGenerator]::GetInt32(0, $i + 1)
+        $tmp = $chars[$i]; $chars[$i] = $chars[$j]; $chars[$j] = $tmp
+    }
+
+    $secure = [securestring]::new()
+    foreach ($c in $chars) { $secure.AppendChar($c) }
+    $secure.MakeReadOnly()
+
+    # Clear the plaintext characters we still hold.
+    for ($i = 0; $i -lt $chars.Count; $i++) { $chars[$i] = [char]0 }
+    $chars.Clear()
+
+    return $secure
+}
+
+function Get-UniformChar {
+    <#
+    .SYNOPSIS
+        Draws a single character from an alphabet without modulo bias.
+    #>
+    [CmdletBinding()]
+    [OutputType([char])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Alphabet
+    )
+
+    return $Alphabet[[System.Security.Cryptography.RandomNumberGenerator]::GetInt32(0, $Alphabet.Length)]
+}
+
+# --- Private/New-RotationSshKeyPair.ps1 -----------------------------
+function New-RotationSshKeyPair {
+    <#
+    .SYNOPSIS
+        Generates an RSA key pair in OpenSSH-compatible form.
+
+    .DESCRIPTION
+        Produces a PKCS#8 PEM private key and an "ssh-rsa" public key.
+
+        Two details matter and are easy to get wrong:
+
+        1. PEM line endings. Base64FormattingOptions::InsertLineBreaks emits CRLF.
+           Mixing that with LF-terminated header lines produces a file that some
+           OpenSSH clients reject outright. This function wraps at 64 characters
+           with LF only.
+
+        2. The public key wire format. "ssh-rsa" is a sequence of length-prefixed
+           big-endian fields, and each integer needs a leading zero byte when its
+           most significant bit is set, or it reads as negative. Building that by
+           appending to a PowerShell array happens to work for RSA and silently
+           breaks the moment anything changes, so it is written explicitly here.
+
+        RSA rather than Ed25519 because the .NET 6 runtime behind PowerShell 7.2
+        runbooks has no Ed25519 primitive. If you run this somewhere with a newer
+        runtime, Ed25519 is the better default.
+
+    .OUTPUTS
+        PSCustomObject with PrivateKey (SecureString, PEM) and PublicKey (String).
+    #>
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [ValidateSet(2048, 3072, 4096)]
+        [int]$KeySize = 4096
+    )
+
+    $rsa = [System.Security.Cryptography.RSA]::Create($KeySize)
+    try {
+        $pem = ConvertTo-PemBlock -Der $rsa.ExportPkcs8PrivateKey() -Label 'PRIVATE KEY'
+
+        $parameters = $rsa.ExportParameters($false)
+        $publicKey = ConvertTo-OpenSshPublicKey -Exponent $parameters.Exponent -Modulus $parameters.Modulus
+
+        return [pscustomobject]@{
+            PrivateKey = ConvertTo-SecureString -String $pem -AsPlainText -Force
+            PublicKey  = $publicKey
+        }
+    }
+    finally {
+        $rsa.Dispose()
+        $pem = $null
+        $parameters = $null
+    }
+}
+
+function ConvertTo-PemBlock {
+    <#
+    .SYNOPSIS
+        Wraps DER bytes in a PEM block with LF line endings.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][byte[]]$Der,
+        [Parameter(Mandatory)][string]$Label
+    )
+
+    $base64 = [Convert]::ToBase64String($Der)
+
+    $builder = [System.Text.StringBuilder]::new()
+    [void]$builder.Append("-----BEGIN $Label-----`n")
+    for ($i = 0; $i -lt $base64.Length; $i += 64) {
+        $take = [Math]::Min(64, $base64.Length - $i)
+        [void]$builder.Append($base64.Substring($i, $take)).Append("`n")
+    }
+    [void]$builder.Append("-----END $Label-----`n")
+
+    return $builder.ToString()
+}
+
+function ConvertTo-OpenSshPublicKey {
+    <#
+    .SYNOPSIS
+        Encodes RSA public parameters as an "ssh-rsa" public key string.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][byte[]]$Exponent,
+        [Parameter(Mandatory)][byte[]]$Modulus
+    )
+
+    $stream = [System.IO.MemoryStream]::new()
+    try {
+        Write-SshString -Stream $stream -Value ([System.Text.Encoding]::ASCII.GetBytes('ssh-rsa'))
+        Write-SshMpint -Stream $stream -Value $Exponent
+        Write-SshMpint -Stream $stream -Value $Modulus
+
+        return 'ssh-rsa ' + [Convert]::ToBase64String($stream.ToArray())
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
+function Write-SshString {
+    <#
+    .SYNOPSIS
+        Writes a length-prefixed byte string in SSH wire format (RFC 4251).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][System.IO.Stream]$Stream,
+        [Parameter(Mandatory)][byte[]]$Value
+    )
+
+    $length = [BitConverter]::GetBytes([uint32]$Value.Length)
+    if ([BitConverter]::IsLittleEndian) { [Array]::Reverse($length) }
+
+    $Stream.Write($length, 0, 4)
+    $Stream.Write($Value, 0, $Value.Length)
+}
+
+function Write-SshMpint {
+    <#
+    .SYNOPSIS
+        Writes a multiple-precision integer in SSH wire format (RFC 4251).
+
+    .DESCRIPTION
+        mpint values are two's complement. A leading zero byte is required when the
+        most significant bit is set, otherwise the value reads as negative. An RSA
+        modulus always has that bit set; a public exponent of 65537 does not.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][System.IO.Stream]$Stream,
+        [Parameter(Mandatory)][byte[]]$Value
+    )
+
+    # Strip any leading zero bytes the provider may have included.
+    $offset = 0
+    while ($offset -lt ($Value.Length - 1) -and $Value[$offset] -eq 0) { $offset++ }
+    $trimmed = $Value[$offset..($Value.Length - 1)]
+
+    if ($trimmed[0] -band 0x80) {
+        $padded = [byte[]]::new($trimmed.Length + 1)
+        $padded[0] = 0
+        [Array]::Copy($trimmed, 0, $padded, 1, $trimmed.Length)
+        $trimmed = $padded
+    }
+
+    Write-SshString -Stream $Stream -Value $trimmed
+}
+
+# --- Private/Resolve-SecretName.ps1 ---------------------------------
+function Resolve-SecretName {
+    <#
+    .SYNOPSIS
+        Builds the Key Vault secret name for a VM credential.
+
+    .DESCRIPTION
+        Key Vault secret names allow only alphanumerics and dashes, and are limited
+        to 127 characters. VM names and admin usernames can contain neither of those
+        guarantees, so both are normalised and the result is truncated with a short
+        hash suffix when it would otherwise overflow.
+
+    .PARAMETER Kind
+        pw       - password, Windows or Linux
+        ssh-priv - SSH private key, Linux
+        ssh-pub  - SSH public key, Linux
+        pending  - staged value written before the VM is updated, see Update-VMCredential
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][string]$AdminUsername,
+        [Parameter(Mandatory)][ValidateSet('pw', 'ssh-priv', 'ssh-pub')][string]$Kind,
+        [switch]$Pending
+    )
+
+    $normalise = {
+        param($value)
+        ($value -replace '[^a-zA-Z0-9-]', '-') -replace '-+', '-'
+    }
+
+    $name = '{0}-{1}-{2}' -f (& $normalise $VMName), (& $normalise $AdminUsername), $Kind
+    if ($Pending) { $name += '-pending' }
+    $name = $name.Trim('-')
+
+    if ($name.Length -gt 127) {
+        # Keep the name recognisable and unique: truncate and append a short digest
+        # of the full name.
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $hash = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($name))
+            $suffix = ([Convert]::ToHexString($hash)).Substring(0, 8).ToLowerInvariant()
+        }
+        finally {
+            $sha.Dispose()
+        }
+        $name = $name.Substring(0, 118) + '-' + $suffix
+    }
+
+    return $name
+}
+
+# --- Private/Test-VMRunning.ps1 -------------------------------------
+function Test-VMRunning {
+    <#
+    .SYNOPSIS
+        Returns whether a VM is running.
+
+    .DESCRIPTION
+        The VMAccess extension needs a running VM and a healthy guest agent. Rotating
+        against a stopped VM either fails or, worse, appears to succeed while the
+        guest never applies the change - which would leave Key Vault and the machine
+        holding different passwords.
+
+        A stopped VM is not an error. It is skipped, and the next scheduled run picks
+        it up. That is the whole retry mechanism.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)][string]$ResourceGroupName,
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    $status = Get-AzVM -ResourceGroupName $ResourceGroupName -Name $Name -Status -ErrorAction Stop
+
+    $powerState = $status.Statuses |
+        Where-Object { $_.Code -like 'PowerState/*' } |
+        Select-Object -First 1 -ExpandProperty Code
+
+    return $powerState -eq 'PowerState/running'
+}
+
+# --- Private/Write-RotationLog.ps1 ----------------------------------
+function Write-RotationLog {
+    <#
+    .SYNOPSIS
+        Writes a structured line to the job log.
+
+    .DESCRIPTION
+        Uses Write-Host, not Write-Output.
+
+        Write-Output looks like the right choice for Azure Automation - it lands in the
+        job output stream, which is what you read in the portal. But it also writes to
+        the success stream, so every log line from a function becomes part of that
+        function's return value. A function that logs twice and returns one object
+        actually returns three things, and the caller silently gets a mess.
+
+        Write-Host writes to the information stream, which Automation also surfaces in
+        the job output, without touching the pipeline.
+
+        Never pass credential material into this function.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Message,
+
+        [ValidateSet('Info', 'Warning', 'Error', 'Success')]
+        [string]$Level = 'Info',
+
+        [string]$Scope
+    )
+
+    $timestamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss')
+    $prefix = if ($Scope) { "[$Level] [$Scope]" } else { "[$Level]" }
+
+    Write-Host "$timestamp $prefix $Message"
+
+    # Also surface warnings and errors on their own streams, so a failing job is
+    # visible in the portal without reading the whole output.
+    switch ($Level) {
+        'Warning' { Write-Warning $Message }
+        'Error' { Write-Error -Message $Message -ErrorAction Continue }
+    }
+}
+
+# --- Private/Write-RotationRecord.ps1 -------------------------------
+function Write-RotationRecord {
+    <#
+    .SYNOPSIS
+        Writes one structured rotation record to a Log Analytics custom table.
+
+    .DESCRIPTION
+        Uses the Logs Ingestion API (data collection endpoint plus data collection
+        rule), not the HTTP Data Collector API. The latter retires on 14 September
+        2026 and would be dead on arrival.
+
+        The record never contains credential material. Secret versions are recorded
+        as identifiers so an auditor can correlate a rotation with the Key Vault
+        audit log without either system holding a value.
+
+        Failure to write a record is logged but does not fail the rotation. The
+        credential change already happened; losing the telemetry is the lesser
+        problem, and the job output still carries the same information.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Record,
+
+        [Parameter(Mandatory)][string]$DataCollectionEndpoint,
+        [Parameter(Mandatory)][string]$DataCollectionRuleId,
+        [string]$StreamName = 'Custom-CredentialRotation_CL'
+    )
+
+    if (-not $PSCmdlet.ShouldProcess($StreamName, 'Write rotation record')) { return }
+
+    try {
+        $token = (Get-AzAccessToken -ResourceUrl 'https://monitor.azure.com' -ErrorAction Stop).Token
+        $uri = '{0}/dataCollectionRules/{1}/streams/{2}?api-version=2023-01-01' -f
+            $DataCollectionEndpoint.TrimEnd('/'), $DataCollectionRuleId, $StreamName
+
+        $body = ConvertTo-Json -InputObject @($Record) -Depth 5 -Compress
+
+        $null = Invoke-RestMethod -Uri $uri -Method Post -Body $body `
+            -ContentType 'application/json' `
+            -Headers @{ Authorization = "Bearer $token" } `
+            -ErrorAction Stop
+
+        Write-RotationLog -Message "Rotation record written for $($Record.SecretName)" -Level Info -Scope 'audit'
+    }
+    catch {
+        Write-RotationLog -Message "Could not write rotation record for $($Record.SecretName): $($_.Exception.Message)" -Level Warning -Scope 'audit'
+    }
+}
+
+function New-RotationRecord {
+    <#
+    .SYNOPSIS
+        Builds the record shape expected by the CredentialRotation_CL custom table.
+
+    .DESCRIPTION
+        TimeGenerated is set explicitly so the record carries the time the rotation
+        completed rather than the time the batch happened to flush.
+    #>
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][string]$SecretName,
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][string]$ResourceGroupName,
+        [Parameter(Mandatory)][string]$SubscriptionId,
+        [Parameter(Mandatory)][ValidateSet('Windows', 'Linux')][string]$OSType,
+        [Parameter(Mandatory)][ValidateSet('Password', 'SSHKey')][string]$CredentialType,
+        [Parameter(Mandatory)][ValidateSet('Expiry', 'Access', 'Missing', 'Manual', 'ResumePending')][string]$TriggerReason,
+        [Parameter(Mandatory)][ValidateSet('Rotated', 'Skipped', 'Failed', 'WhatIf')][string]$Result,
+
+        [datetime]$StartedAt = (Get-Date).ToUniversalTime(),
+        [string]$TriggeredBy,
+        [string]$PreviousSecretVersion,
+        [string]$NewSecretVersion,
+        [string]$Detail
+    )
+
+    $now = (Get-Date).ToUniversalTime()
+
+    return [pscustomobject]@{
+        TimeGenerated         = $now.ToString('o')
+        SecretName            = $SecretName
+        VMName                = $VMName
+        ResourceGroupName     = $ResourceGroupName
+        SubscriptionId        = $SubscriptionId
+        OSType                = $OSType
+        CredentialType        = $CredentialType
+        TriggerReason         = $TriggerReason
+        TriggeredBy           = $TriggeredBy
+        Result                = $Result
+        StartedAt             = $StartedAt.ToString('o')
+        DurationMs            = [int]($now - $StartedAt).TotalMilliseconds
+        PreviousSecretVersion = $PreviousSecretVersion
+        NewSecretVersion      = $NewSecretVersion
+        Detail                = $Detail
+    }
+}
+
+#endregion Private
+
+#region Public
+
+# --- Public/Get-RotationCandidate.ps1 -------------------------------
+function Get-RotationCandidate {
+    <#
+    .SYNOPSIS
+        Finds the credentials that need rotating.
+
+    .DESCRIPTION
+        Opt-in, not opt-out. A VM is only considered when it carries the enable tag.
+
+        This is the difference between a tool and an incident. A discovery loop that
+        treats "no secret exists for this VM" as "rotate it" will, on its first run
+        in an established tenant, change the local administrator password of every
+        machine it can see - including the ones whose credentials live in a CMDB or a
+        password manager that nobody told it about.
+
+        Rotation is triggered by one of four conditions:
+
+          ResumePending - a previous run was interrupted after staging a value
+          Missing       - no secret yet, or a secret with no expiry date
+          Expiry        - the expiry date is within the threshold
+          Access        - not detected here; access pulls the expiry date forward,
+                          and this function then sees it as Expiry
+
+        The last point is the design in one sentence: the expiry date is the only
+        signal. Everything else writes to it.
+
+    .OUTPUTS
+        PSCustomObject with VM, CredentialType, Reason, SecretName, ExpiresOn.
+    #>
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][string]$VaultName,
+
+        [ValidateRange(0, 3650)][int]$ThresholdDays = 14,
+
+        [string]$EnableTagName = 'CredentialRotation',
+        [string]$EnableTagValue = 'enabled',
+        [string]$HoldTagName = 'CredentialRotationHold',
+
+        # Linux VMs get an SSH key rotated unless this is set.
+        [switch]$SkipSshKeys
+    )
+
+    $candidates = [System.Collections.Generic.List[object]]::new()
+    $now = (Get-Date).ToUniversalTime()
+
+    $vms = @(Get-AzVM -ErrorAction Stop | Where-Object {
+        $_.Tags -and
+        $_.Tags.ContainsKey($EnableTagName) -and
+        $_.Tags[$EnableTagName] -eq $EnableTagValue
+    })
+
+    Write-RotationLog -Message "$($vms.Count) VM(s) tagged $EnableTagName=$EnableTagValue in this subscription" -Level Info -Scope 'discovery'
+
+    foreach ($vm in $vms) {
+        if ($vm.Tags.ContainsKey($HoldTagName) -and $vm.Tags[$HoldTagName] -eq 'true') {
+            Write-RotationLog -Message "On hold via $HoldTagName, skipping" -Level Warning -Scope $vm.Name
+            continue
+        }
+
+        $adminUsername = $vm.OSProfile.AdminUsername
+        if ([string]::IsNullOrWhiteSpace($adminUsername)) {
+            Write-RotationLog -Message 'No admin username in the OS profile (specialised image?), skipping' -Level Warning -Scope $vm.Name
+            continue
+        }
+
+        $osType = [string]$vm.StorageProfile.OsDisk.OsType
+        $types = [System.Collections.Generic.List[string]]::new()
+
+        if ($osType -eq 'Windows') {
+            $types.Add('Password')
+        }
+        elseif ($osType -eq 'Linux') {
+            $passwordAuthEnabled = -not $vm.OSProfile.LinuxConfiguration.DisablePasswordAuthentication
+            if ($passwordAuthEnabled) { $types.Add('Password') }
+            if (-not $SkipSshKeys) { $types.Add('SSHKey') }
+        }
+        else {
+            Write-RotationLog -Message "Unknown OS type '$osType', skipping" -Level Warning -Scope $vm.Name
+            continue
+        }
+
+        foreach ($type in $types) {
+            $kind = if ($type -eq 'Password') { 'pw' } else { 'ssh-priv' }
+            $secretName = Resolve-SecretName -VMName $vm.Name -AdminUsername $adminUsername -Kind $kind
+            $pendingName = Resolve-SecretName -VMName $vm.Name -AdminUsername $adminUsername -Kind $kind -Pending
+
+            $reason = $null
+            $expiresOn = $null
+
+            $pending = Get-RotationSecret -VaultName $VaultName -Name $pendingName
+            $isPendingOpen = $pending.Exists -and
+                             $pending.Secret.Tags.State -eq 'pending' -and
+                             $pending.Secret.Enabled -ne $false
+
+            if ($isPendingOpen) {
+                $reason = 'ResumePending'
+            }
+            else {
+                $secret = Get-RotationSecret -VaultName $VaultName -Name $secretName
+
+                if (-not $secret.Exists) {
+                    $reason = 'Missing'
+                }
+                elseif ($secret.Secret.Tags -and $secret.Secret.Tags[$HoldTagName] -eq 'true') {
+                    Write-RotationLog -Message "Secret '$secretName' is on hold, skipping" -Level Warning -Scope $vm.Name
+                    continue
+                }
+                elseif ($null -eq $secret.Secret.Expires) {
+                    $reason = 'Missing'
+                    Write-RotationLog -Message "Secret '$secretName' has no expiry date" -Level Warning -Scope $vm.Name
+                }
+                else {
+                    $expiresOn = $secret.Secret.Expires.ToUniversalTime()
+                    if (($expiresOn - $now).TotalDays -le $ThresholdDays) {
+                        $reason = 'Expiry'
+                    }
+                }
+            }
+
+            if (-not $reason) { continue }
+
+            $candidates.Add([pscustomobject]@{
+                VM             = $vm
+                CredentialType = $type
+                Reason         = $reason
+                SecretName     = $secretName
+                ExpiresOn      = $expiresOn
+            })
+        }
+    }
+
+    return $candidates.ToArray()
+}
+
+# --- Public/Invoke-CredentialRotation.ps1 ---------------------------
+function Invoke-CredentialRotation {
+    <#
+    .SYNOPSIS
+        Reconciles VM credentials against their Key Vault expiry dates.
+
+    .DESCRIPTION
+        One pass over the estate:
+
+          1. ask Log Analytics which secrets a human read, and pull those expiry
+             dates forward (optional, requires the observability module)
+          2. find every credential that is missing, expiring or half-rotated
+          3. rotate it
+          4. write a record of what happened
+
+        There is no event subscription and no queue. The run is the retry: anything
+        that fails or is skipped - a stopped VM, a throttled call, an unhealthy guest
+        agent - is simply picked up next time. That is what makes the whole thing
+        small enough to reason about.
+
+        Latency is the trade. A credential read at 09:00 with a six-hourly schedule
+        and an eight-hour grace period is replaced some time before 23:00, not within
+        minutes. For credentials that would otherwise sit unchanged for months, that
+        is not a meaningful difference. If it is for you, see
+        docs/decisions/0002-reconciliation-loop-over-events.md, which describes what
+        an event-driven version would need.
+
+    .PARAMETER SubscriptionId
+        Subscriptions to process. Defaults to the current context only - deliberately
+        narrow, so an unscoped run cannot reach further than intended.
+
+    .EXAMPLE
+        Invoke-CredentialRotation -VaultName kv-creds -WhatIf
+
+        Reports what would be rotated without touching anything. Always the first run.
+
+    .OUTPUTS
+        PSCustomObject summarising the run, with the individual records attached.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][string]$VaultName,
+
+        [string[]]$SubscriptionId,
+
+        [ValidateRange(0, 3650)][int]$ThresholdDays = 14,
+        [ValidateRange(1, 3650)][int]$ValidityDays = 90,
+
+        [string]$EnableTagName = 'CredentialRotation',
+        [string]$EnableTagValue = 'enabled',
+        [string]$HoldTagName = 'CredentialRotationHold',
+        [switch]$SkipSshKeys,
+        [switch]$RemovePriorSshKeys,
+        [switch]$ResetSshConfiguration,
+
+        # Access-triggered rotation. Without a workspace, only expiry drives rotation.
+        [string]$WorkspaceId,
+        [ValidateRange(0, 168)][int]$GracePeriodHours = 8,
+        [ValidateRange(1, 720)][int]$AccessLookbackHours = 24,
+        [string[]]$ExcludeObjectId = @(),
+
+        # Structured audit records. Without these, the job output is the only trail.
+        [string]$DataCollectionEndpoint,
+        [string]$DataCollectionRuleId,
+        [string]$StreamName = 'Custom-CredentialRotation_CL',
+
+        [string]$TriggeredBy
+    )
+
+    $startTime = Get-Date
+    $records = [System.Collections.Generic.List[object]]::new()
+
+    $stats = [ordered]@{
+        Candidates   = 0
+        Rotated      = 0
+        Skipped      = 0
+        Failed       = 0
+        AccessMarked = 0
+    }
+
+    Write-RotationLog -Message '=== Credential rotation started ===' -Level Info
+    Write-RotationLog -Message "Vault: $VaultName | threshold: $ThresholdDays d | validity: $ValidityDays d | access-driven: $([bool]$WorkspaceId)" -Level Info
+
+    if (-not (Get-AzContext -ErrorAction SilentlyContinue)) {
+        throw 'No Azure context. Connect with Connect-AzAccount -Identity before calling this function.'
+    }
+
+    # --- 1. access-driven expiry updates ------------------------------------
+    if ($WorkspaceId) {
+        try {
+            $marked = Register-CredentialAccess -VaultName $VaultName -WorkspaceId $WorkspaceId `
+                -GracePeriodHours $GracePeriodHours -LookbackHours $AccessLookbackHours `
+                -ExcludeObjectId $ExcludeObjectId -HoldTagName $HoldTagName
+            $stats.AccessMarked = @($marked).Count
+        }
+        catch {
+            # A workspace problem must not stop expiry-driven rotation.
+            Write-RotationLog -Message "Access scan failed, continuing with expiry-driven rotation only: $($_.Exception.Message)" -Level Error -Scope 'access'
+            $stats.Failed++
+        }
+    }
+
+    # --- 2 & 3. find and rotate ---------------------------------------------
+    $subscriptions = if ($SubscriptionId) { $SubscriptionId } else { @((Get-AzContext).Subscription.Id) }
+
+    foreach ($sub in $subscriptions) {
+        Write-RotationLog -Message "--- Subscription $sub ---" -Level Info
+
+        try {
+            $null = Set-AzContext -SubscriptionId $sub -ErrorAction Stop
+        }
+        catch {
+            Write-RotationLog -Message "Cannot switch to subscription ${sub}: $($_.Exception.Message)" -Level Error
+            $stats.Failed++
+            continue
+        }
+
+        try {
+            $candidates = Get-RotationCandidate -VaultName $VaultName -ThresholdDays $ThresholdDays `
+                -EnableTagName $EnableTagName -EnableTagValue $EnableTagValue `
+                -HoldTagName $HoldTagName -SkipSshKeys:$SkipSshKeys
+        }
+        catch {
+            Write-RotationLog -Message "Discovery failed in subscription ${sub}: $($_.Exception.Message)" -Level Error
+            $stats.Failed++
+            continue
+        }
+
+        $stats.Candidates += @($candidates).Count
+        Write-RotationLog -Message "$(@($candidates).Count) credential(s) to process" -Level Info
+
+        foreach ($candidate in $candidates) {
+            try {
+                $record = Update-VMCredential -VaultName $VaultName -VM $candidate.VM `
+                    -CredentialType $candidate.CredentialType -ValidityDays $ValidityDays `
+                    -TriggerReason $candidate.Reason -TriggeredBy $TriggeredBy `
+                    -RemovePriorSshKeys:$RemovePriorSshKeys `
+                    -ResetSshConfiguration:$ResetSshConfiguration `
+                    -WhatIf:$WhatIfPreference -Confirm:$false
+
+                $records.Add($record)
+
+                switch ($record.Result) {
+                    'Rotated' { $stats.Rotated++ }
+                    'Skipped' { $stats.Skipped++ }
+                    'Failed' { $stats.Failed++ }
+                    'WhatIf' { $stats.Skipped++ }
+                }
+            }
+            catch {
+                Write-RotationLog -Message "Unhandled error on $($candidate.VM.Name) ($($candidate.CredentialType)): $($_.Exception.Message)" -Level Error -Scope $candidate.VM.Name
+                $stats.Failed++
+            }
+        }
+    }
+
+    # --- 4. audit records ----------------------------------------------------
+    if ($DataCollectionEndpoint -and $DataCollectionRuleId -and $records.Count -gt 0) {
+        foreach ($record in $records) {
+            Write-RotationRecord -Record $record `
+                -DataCollectionEndpoint $DataCollectionEndpoint `
+                -DataCollectionRuleId $DataCollectionRuleId `
+                -StreamName $StreamName -Confirm:$false
+        }
+    }
+
+    $duration = (Get-Date) - $startTime
+
+    Write-RotationLog -Message '=== Summary ===' -Level Info
+    Write-RotationLog -Message "Duration: $($duration.ToString('hh\:mm\:ss'))" -Level Info
+    Write-RotationLog -Message "Expiry pulled forward after access: $($stats.AccessMarked)" -Level Info
+    Write-RotationLog -Message "Candidates: $($stats.Candidates) | rotated: $($stats.Rotated) | skipped: $($stats.Skipped) | failed: $($stats.Failed)" `
+        -Level $(if ($stats.Failed -gt 0) { 'Warning' } else { 'Success' })
+
+    return [pscustomobject]@{
+        StartedAt    = $startTime.ToUniversalTime()
+        Duration     = $duration
+        Candidates   = $stats.Candidates
+        Rotated      = $stats.Rotated
+        Skipped      = $stats.Skipped
+        Failed       = $stats.Failed
+        AccessMarked = $stats.AccessMarked
+        Records      = $records.ToArray()
+    }
+}
+
+# --- Public/Register-CredentialAccess.ps1 ---------------------------
+function Register-CredentialAccess {
+    <#
+    .SYNOPSIS
+        Brings the expiry date forward for secrets a human has read.
+
+    .DESCRIPTION
+        Rotation after use, without a second execution path.
+
+        A credential that someone has read is spent. It has been in a clipboard, a
+        terminal scrollback, an RDP client, possibly a screen share or a ticket. The
+        useful response is to replace it soon - but not instantly, because the person
+        who read it is usually still using it.
+
+        Rather than schedule a delayed job, this writes the deadline where the system
+        already looks: the secret's expiry date. Set it to now plus the grace period,
+        and the next scheduled run treats it as any other near-expiry secret. No
+        timer, no queue, no orchestrator, no second code path to test.
+
+        Changing an expiry date is an attribute update. It does not create a new
+        secret version and it does not read the value, so it neither disturbs
+        consumers nor pollutes the audit trail this function depends on.
+
+    .PARAMETER GracePeriodHours
+        How long the reader keeps working credentials. Eight hours covers a working
+        day. Note that a password change does not end an established RDP session, but
+        it does break reconnects, UAC elevation and anything that re-authenticates.
+
+    .OUTPUTS
+        PSCustomObject per secret whose expiry was moved.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][string]$VaultName,
+        [Parameter(Mandatory)][string]$WorkspaceId,
+
+        [ValidateRange(0, 168)][int]$GracePeriodHours = 8,
+        [ValidateRange(1, 720)][int]$LookbackHours = 24,
+        [string[]]$ExcludeObjectId = @(),
+        [string]$HoldTagName = 'CredentialRotationHold'
+    )
+
+    $accessed = Get-AccessedSecret -WorkspaceId $WorkspaceId -VaultName $VaultName `
+        -LookbackHours $LookbackHours -ExcludeObjectId $ExcludeObjectId
+
+    if ($accessed.Count -eq 0) {
+        Write-RotationLog -Message 'No human secret reads in the lookback window' -Level Info -Scope 'access'
+        return @()
+    }
+
+    $now = (Get-Date).ToUniversalTime()
+    $deadline = $now.AddHours($GracePeriodHours)
+    $results = [System.Collections.Generic.List[object]]::new()
+
+    foreach ($entry in $accessed) {
+        # Staging secrets are read by this tool itself during recovery; never treat
+        # them as user access.
+        if ($entry.SecretName -like '*-pending') { continue }
+
+        $meta = Get-RotationSecret -VaultName $VaultName -Name $entry.SecretName
+        if (-not $meta.Exists) { continue }
+
+        if ($meta.Secret.Tags -and $meta.Secret.Tags[$HoldTagName] -eq 'true') {
+            Write-RotationLog -Message "'$($entry.SecretName)' was read by $($entry.AccessedBy) but is on hold, leaving expiry untouched" -Level Warning -Scope 'access'
+            continue
+        }
+
+        $currentExpiry = if ($meta.Secret.Expires) { $meta.Secret.Expires.ToUniversalTime() } else { $null }
+
+        # Never push an expiry date further out than it already is.
+        if ($currentExpiry -and $currentExpiry -le $deadline) {
+            Write-RotationLog -Message "'$($entry.SecretName)' already expires at $($currentExpiry.ToString('u')), no change" -Level Info -Scope 'access'
+            continue
+        }
+
+        if (-not $PSCmdlet.ShouldProcess($entry.SecretName, "Bring expiry forward to $($deadline.ToString('u'))")) {
+            $results.Add([pscustomobject]@{
+                SecretName = $entry.SecretName
+                AccessedBy = $entry.AccessedBy
+                NewExpiry  = $deadline
+                Applied    = $false
+            })
+            continue
+        }
+
+        $tags = @{}
+        if ($meta.Secret.Tags) { $meta.Secret.Tags.GetEnumerator() | ForEach-Object { $tags[$_.Key] = $_.Value } }
+        $tags['LastAccessedBy'] = $entry.AccessedBy
+        $tags['LastAccessedAt'] = $entry.LastAccessedAt.ToString('o')
+        $tags['RotationReason'] = 'Access'
+
+        $null = Update-AzKeyVaultSecret -VaultName $VaultName -Name $entry.SecretName `
+            -Expires $deadline -Tag $tags -ErrorAction Stop
+
+        Write-RotationLog -Message "'$($entry.SecretName)' was read by $($entry.AccessedBy), expiry moved to $($deadline.ToString('u'))" -Level Success -Scope 'access'
+
+        $results.Add([pscustomobject]@{
+            SecretName = $entry.SecretName
+            AccessedBy = $entry.AccessedBy
+            NewExpiry  = $deadline
+            Applied    = $true
+        })
+    }
+
+    return $results.ToArray()
+}
+
+# --- Public/Update-VMCredential.ps1 ---------------------------------
+function Update-VMCredential {
+    <#
+    .SYNOPSIS
+        Rotates one credential on one VM and stores it in Key Vault.
+
+    .DESCRIPTION
+        Write order is the point of this function.
+
+        The naive order is: change the VM, then store the new value. If the Key Vault
+        write then fails - throttling, a role assignment that expired, a firewall
+        rule - the machine has a password nobody knows. That is unrecoverable without
+        a serial console or a disk swap.
+
+        This function stages the value first, in a separate secret named
+        "<name>-pending":
+
+            1. write the new value to <name>-pending, tagged State=pending
+            2. apply it to the VM through the VMAccess extension
+            3. write it to <name> with the real expiry
+            4. mark <name>-pending as consumed and disable that version
+
+        Any crash leaves the value recoverable. If the run dies between 2 and 3, the
+        next run finds an open pending secret, reapplies the same value to the VM
+        (idempotent) and promotes it. Callers see <name> only ever holding a value
+        the VM has actually accepted.
+
+        The pending secret is disabled rather than deleted, because Key Vault
+        soft-delete keeps a deleted name reserved and the next write to it would
+        fail until purged.
+
+    .PARAMETER RemovePriorSshKeys
+        Defaults to false, deliberately. The VMAccess extension can wipe every entry
+        in authorized_keys, which takes out colleagues, configuration management and
+        backup agents along with the key you meant to replace. Turn it on only if you
+        are certain this tool owns every key on the machine.
+
+    .PARAMETER ResetSshConfiguration
+        Defaults to false, deliberately. VMAccess can restore sshd configuration to
+        its default, which silently undoes hardening on a CIS-baselined host.
+
+    .OUTPUTS
+        PSCustomObject describing the outcome.
+    #>
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][string]$VaultName,
+        [Parameter(Mandatory)][ValidateNotNull()]$VM,
+        [Parameter(Mandatory)][ValidateSet('Password', 'SSHKey')][string]$CredentialType,
+
+        [ValidateRange(1, 3650)][int]$ValidityDays = 90,
+        [ValidateSet('Expiry', 'Access', 'Missing', 'Manual', 'ResumePending')][string]$TriggerReason = 'Expiry',
+        [string]$TriggeredBy,
+
+        [switch]$RemovePriorSshKeys,
+        [switch]$ResetSshConfiguration
+    )
+
+    $startedAt = (Get-Date).ToUniversalTime()
+    $adminUsername = $VM.OSProfile.AdminUsername
+    $osType = [string]$VM.StorageProfile.OsDisk.OsType
+    $subscriptionId = ($VM.Id -split '/')[2]
+
+    if ([string]::IsNullOrWhiteSpace($adminUsername)) {
+        throw "VM '$($VM.Name)' has no admin username in its OS profile. This happens with specialised images; such VMs must be excluded from rotation."
+    }
+
+    $kind = if ($CredentialType -eq 'Password') { 'pw' } else { 'ssh-priv' }
+    $secretName = Resolve-SecretName -VMName $VM.Name -AdminUsername $adminUsername -Kind $kind
+    $pendingName = Resolve-SecretName -VMName $VM.Name -AdminUsername $adminUsername -Kind $kind -Pending
+
+    $record = @{
+        SecretName        = $secretName
+        VMName            = $VM.Name
+        ResourceGroupName = $VM.ResourceGroupName
+        SubscriptionId    = $subscriptionId
+        OSType            = $osType
+        CredentialType    = $CredentialType
+        TriggerReason     = $TriggerReason
+        TriggeredBy       = $TriggeredBy
+        StartedAt         = $startedAt
+    }
+
+    $current = Get-RotationSecret -VaultName $VaultName -Name $secretName
+    $previousVersion = if ($current.Exists) { $current.Secret.Version } else { $null }
+
+    if (-not $PSCmdlet.ShouldProcess("$($VM.Name) ($CredentialType)", 'Rotate credential')) {
+        Write-RotationLog -Message "Would rotate $CredentialType for $($VM.Name) [$TriggerReason]" -Level Info -Scope $VM.Name
+        return New-RotationRecord @record -Result 'WhatIf' -PreviousSecretVersion $previousVersion -Detail 'WhatIf mode, no changes made'
+    }
+
+    if (-not (Test-VMRunning -ResourceGroupName $VM.ResourceGroupName -Name $VM.Name)) {
+        Write-RotationLog -Message "VM is not running, skipping. The next run will retry." -Level Warning -Scope $VM.Name
+        return New-RotationRecord @record -Result 'Skipped' -PreviousSecretVersion $previousVersion -Detail 'VM not running'
+    }
+
+    # ---- 1. stage the value -------------------------------------------------
+    $pending = Get-PendingCredential -VaultName $VaultName -PendingName $pendingName
+
+    if ($pending.IsOpen) {
+        Write-RotationLog -Message "Resuming an interrupted rotation from $($pending.CreatedAt)" -Level Warning -Scope $VM.Name
+        $secretValue = $pending.Value
+        $publicKey = $pending.PublicKey
+    }
+    else {
+        if ($CredentialType -eq 'Password') {
+            $secretValue = New-RotationPassword
+            $publicKey = $null
+        }
+        else {
+            $keyPair = New-RotationSshKeyPair
+            $secretValue = $keyPair.PrivateKey
+            $publicKey = $keyPair.PublicKey
+        }
+
+        $pendingTags = @{
+            State     = 'pending'
+            VMName    = $VM.Name
+            AdminName = $adminUsername
+            CreatedAt = $startedAt.ToString('o')
+        }
+        if ($publicKey) { $pendingTags['PublicKey'] = $publicKey }
+
+        $null = Set-AzKeyVaultSecret -VaultName $VaultName -Name $pendingName `
+            -SecretValue $secretValue `
+            -Expires $startedAt.AddDays(1) `
+            -Tag $pendingTags `
+            -ErrorAction Stop
+
+        Write-RotationLog -Message "Staged new $CredentialType in '$pendingName'" -Level Info -Scope $VM.Name
+    }
+
+    # ---- 2. apply it to the machine ----------------------------------------
+    try {
+        Set-VMAccessCredential -VM $VM -AdminUsername $adminUsername -OSType $osType `
+            -CredentialType $CredentialType -SecretValue $secretValue -PublicKey $publicKey `
+            -RemovePriorSshKeys:$RemovePriorSshKeys -ResetSshConfiguration:$ResetSshConfiguration
+
+        Write-RotationLog -Message "VM accepted the new $CredentialType" -Level Success -Scope $VM.Name
+    }
+    catch {
+        Write-RotationLog -Message "VM did not accept the new ${CredentialType}: $($_.Exception.Message)" -Level Error -Scope $VM.Name
+        return New-RotationRecord @record -Result 'Failed' -PreviousSecretVersion $previousVersion `
+            -Detail "VMAccess extension failed: $($_.Exception.Message). Staged value remains in '$pendingName'."
+    }
+
+    # ---- 3. promote ---------------------------------------------------------
+    $tags = @{
+        VMName         = $VM.Name
+        AdminName      = $adminUsername
+        OSType         = $osType
+        CredentialType = $CredentialType
+        LastRotated    = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd')
+        RotatedBy      = 'azure-vm-credential-rotation'
+    }
+
+    $new = Set-AzKeyVaultSecret -VaultName $VaultName -Name $secretName `
+        -SecretValue $secretValue `
+        -Expires (Get-Date).ToUniversalTime().AddDays($ValidityDays) `
+        -Tag $tags `
+        -ErrorAction Stop
+
+    # The public key is not secret, but keeping it beside the private key saves
+    # anyone from having to derive it later.
+    if ($CredentialType -eq 'SSHKey' -and $publicKey) {
+        $publicName = Resolve-SecretName -VMName $VM.Name -AdminUsername $adminUsername -Kind 'ssh-pub'
+        $null = Set-AzKeyVaultSecret -VaultName $VaultName -Name $publicName `
+            -SecretValue (ConvertTo-SecureString -String $publicKey -AsPlainText -Force) `
+            -Expires (Get-Date).ToUniversalTime().AddDays($ValidityDays) `
+            -Tag $tags -ErrorAction Stop
+    }
+
+    # ---- 4. close the staging secret ---------------------------------------
+    Close-PendingCredential -VaultName $VaultName -PendingName $pendingName -Version $pending.Version
+
+    Write-RotationLog -Message "Rotated $CredentialType, new version $($new.Version), expires in $ValidityDays days" -Level Success -Scope $VM.Name
+
+    return New-RotationRecord @record -Result 'Rotated' `
+        -PreviousSecretVersion $previousVersion -NewSecretVersion $new.Version
+}
+
+function Get-PendingCredential {
+    <#
+    .SYNOPSIS
+        Returns the staged credential for a secret, if a rotation was interrupted.
+    #>
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][string]$VaultName,
+        [Parameter(Mandatory)][string]$PendingName
+    )
+
+    $result = [pscustomobject]@{
+        IsOpen    = $false
+        Value     = $null
+        PublicKey = $null
+        Version   = $null
+        CreatedAt = $null
+    }
+
+    $meta = Get-RotationSecret -VaultName $VaultName -Name $PendingName
+    if (-not $meta.Exists) { return $result }
+    if ($meta.Secret.Tags.State -ne 'pending') { return $result }
+    if ($meta.Secret.Enabled -eq $false) { return $result }
+
+    # Reading the staged value is a SecretGet by the managed identity. It carries no
+    # upn claim, so it never registers as human access.
+    $full = Get-AzKeyVaultSecret -VaultName $VaultName -Name $PendingName -ErrorAction Stop
+
+    $result.IsOpen = $true
+    $result.Value = $full.SecretValue
+    $result.PublicKey = $meta.Secret.Tags.PublicKey
+    $result.Version = $meta.Secret.Version
+    $result.CreatedAt = $meta.Secret.Tags.CreatedAt
+
+    return $result
+}
+
+function Close-PendingCredential {
+    <#
+    .SYNOPSIS
+        Marks a staged credential as consumed.
+
+    .DESCRIPTION
+        Disables the version and retags it rather than deleting the secret. Key Vault
+        soft-delete keeps a deleted name reserved until it is purged, and the next
+        rotation would fail trying to write to that name.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VaultName,
+        [Parameter(Mandatory)][string]$PendingName,
+        [string]$Version
+    )
+
+    try {
+        $params = @{
+            VaultName   = $VaultName
+            Name        = $PendingName
+            Enable      = $false
+            Tag         = @{ State = 'consumed'; ConsumedAt = (Get-Date).ToUniversalTime().ToString('o') }
+            ErrorAction = 'Stop'
+        }
+        if ($Version) { $params['Version'] = $Version }
+
+        $null = Update-AzKeyVaultSecret @params
+    }
+    catch {
+        # The credential is safely in place at this point; a stale pending marker is
+        # cosmetic and will be overwritten by the next rotation.
+        Write-RotationLog -Message "Could not close staging secret '$PendingName': $($_.Exception.Message)" -Level Warning
+    }
+}
+
+function Set-VMAccessCredential {
+    <#
+    .SYNOPSIS
+        Applies a credential to a VM through the VMAccess extension.
+
+    .DESCRIPTION
+        Note what this does beyond changing a password: if the account named in the
+        OS profile no longer exists on the machine, VMAccess recreates it as a local
+        administrator. Someone may have removed or renamed that account on purpose.
+        See docs/threat-model.md.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$VM,
+        [Parameter(Mandatory)][string]$AdminUsername,
+        [Parameter(Mandatory)][string]$OSType,
+        [Parameter(Mandatory)][string]$CredentialType,
+        [Parameter(Mandatory)][securestring]$SecretValue,
+        [string]$PublicKey,
+        [switch]$RemovePriorSshKeys,
+        [switch]$ResetSshConfiguration
+    )
+
+    $common = @{
+        ResourceGroupName = $VM.ResourceGroupName
+        VMName            = $VM.Name
+        Location          = $VM.Location
+        ForceRerun        = (New-Guid).Guid
+        ErrorAction       = 'Stop'
+    }
+
+    if ($OSType -eq 'Windows') {
+        $plain = ConvertFrom-SecureString -SecureString $SecretValue -AsPlainText
+        try {
+            $null = Set-AzVMExtension @common `
+                -Name 'VMAccessAgent' `
+                -Publisher 'Microsoft.Compute' `
+                -ExtensionType 'VMAccessAgent' `
+                -TypeHandlerVersion '2.4' `
+                -Settings @{ UserName = $AdminUsername } `
+                -ProtectedSettings @{ Password = $plain }
+        }
+        finally {
+            $plain = $null
+            [System.GC]::Collect()
+        }
+        return
+    }
+
+    $protected = @{ username = $AdminUsername }
+
+    if ($CredentialType -eq 'Password') {
+        $plain = ConvertFrom-SecureString -SecureString $SecretValue -AsPlainText
+        $protected['password'] = $plain
+        $protected['reset_ssh'] = $false
+    }
+    else {
+        if ([string]::IsNullOrWhiteSpace($PublicKey)) {
+            throw 'SSH rotation requires a public key.'
+        }
+        $protected['ssh_key'] = $PublicKey
+        $protected['reset_ssh'] = [bool]$ResetSshConfiguration
+        $protected['remove_prior_keys'] = [bool]$RemovePriorSshKeys
+    }
+
+    try {
+        $null = Set-AzVMExtension @common `
+            -Name 'VMAccessForLinux' `
+            -Publisher 'Microsoft.OSTCExtensions' `
+            -ExtensionType 'VMAccessForLinux' `
+            -TypeHandlerVersion '1.5' `
+            -ProtectedSettings $protected
+    }
+    finally {
+        $protected['password'] = $null
+        $plain = $null
+        [System.GC]::Collect()
+    }
+}
+
+#endregion Public
+
+#region runbook
+
+$ErrorActionPreference = 'Stop'
+
+# ---------------------------------------------------------------------------
+# configuration helpers
+# ---------------------------------------------------------------------------
+
+function Get-RunbookSetting {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        $Value,
+        $Default
+    )
+
+    $isSet = $null -ne $Value -and
+             -not ($Value -is [string] -and [string]::IsNullOrWhiteSpace($Value)) -and
+             -not ($Value -is [int] -and $Value -eq 0)
+
+    if ($isSet) { return $Value }
+
+    try {
+        $fromVariable = Get-AutomationVariable -Name "CR_$Name" -ErrorAction Stop
+        if ($null -ne $fromVariable -and -not ([string]::IsNullOrWhiteSpace([string]$fromVariable))) {
+            return $fromVariable
+        }
+    }
+    catch {
+        # Variable not present. Expected whenever an optional module is not deployed,
+        # so this is a normal path rather than an error.
+        Write-Verbose "Automation variable CR_$Name not set, using the default."
+    }
+
+    return $Default
+}
+
+# ---------------------------------------------------------------------------
+# authenticate
+# ---------------------------------------------------------------------------
+
+# Keeps contexts from leaking between concurrent jobs in the same sandbox.
+$null = Disable-AzContextAutosave -Scope Process
+
+Write-Host "$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss')) [Info] Connecting with the managed identity"
+$null = Connect-AzAccount -Identity -ErrorAction Stop
+
+# ---------------------------------------------------------------------------
+# resolve configuration
+# ---------------------------------------------------------------------------
+
+$config = @{
+    VaultName             = Get-RunbookSetting -Name 'VaultName' -Value $VaultName
+    ThresholdDays         = [int](Get-RunbookSetting -Name 'ThresholdDays' -Value $ThresholdDays -Default 14)
+    ValidityDays          = [int](Get-RunbookSetting -Name 'ValidityDays' -Value $ValidityDays -Default 90)
+    EnableTagName         = Get-RunbookSetting -Name 'EnableTagName' -Value $EnableTagName -Default 'CredentialRotation'
+    EnableTagValue        = Get-RunbookSetting -Name 'EnableTagValue' -Value $EnableTagValue -Default 'enabled'
+    SkipSshKeys           = $SkipSshKeys
+    RemovePriorSshKeys    = $RemovePriorSshKeys
+    ResetSshConfiguration = $ResetSshConfiguration
+}
+
+if ([string]::IsNullOrWhiteSpace($config.VaultName)) {
+    throw 'No vault name. Pass -VaultName or set the automation variable CR_VaultName.'
+}
+
+$subscriptions = if ($SubscriptionId) {
+    $SubscriptionId -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+}
+else {
+    $fromVariable = Get-RunbookSetting -Name 'SubscriptionId' -Default ''
+    if ($fromVariable) { $fromVariable -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } } else { $null }
+}
+
+# Optional: access-driven rotation, present only when the modules are deployed.
+$workspaceId = Get-RunbookSetting -Name 'WorkspaceId' -Default ''
+$accessEnabled = [bool]::TryParse([string](Get-RunbookSetting -Name 'AccessRotationEnabled' -Default 'false'), [ref]$null) -and
+                 ([string](Get-RunbookSetting -Name 'AccessRotationEnabled' -Default 'false')) -eq 'true'
+
+if (-not $accessEnabled) { $workspaceId = '' }
+
+$optional = @{}
+if ($workspaceId) {
+    $optional['WorkspaceId'] = $workspaceId
+    $optional['GracePeriodHours'] = [int](Get-RunbookSetting -Name 'GracePeriodHours' -Default 8)
+    $optional['AccessLookbackHours'] = [int](Get-RunbookSetting -Name 'AccessLookbackHours' -Default 24)
+
+    $exclude = [string](Get-RunbookSetting -Name 'ExcludeObjectId' -Default '')
+    if ($exclude) {
+        $optional['ExcludeObjectId'] = $exclude -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+    }
+}
+
+$dce = Get-RunbookSetting -Name 'DataCollectionEndpoint' -Default ''
+$dcr = Get-RunbookSetting -Name 'DataCollectionRuleId' -Default ''
+if ($dce -and $dcr) {
+    $optional['DataCollectionEndpoint'] = $dce
+    $optional['DataCollectionRuleId'] = $dcr
+    $optional['StreamName'] = Get-RunbookSetting -Name 'StreamName' -Default 'Custom-CredentialRotation_CL'
+}
+
+# ---------------------------------------------------------------------------
+# guard against overlapping runs
+# ---------------------------------------------------------------------------
+
+$accountName = Get-RunbookSetting -Name 'AutomationAccountName' -Default ''
+$accountRg = Get-RunbookSetting -Name 'AutomationResourceGroup' -Default ''
+
+if ($accountName -and $accountRg -and $PSPrivateMetadata.JobId) {
+    try {
+        $thisJobId = $PSPrivateMetadata.JobId.Guid
+        $running = Get-AzAutomationJob -ResourceGroupName $accountRg -AutomationAccountName $accountName `
+            -RunbookName 'Invoke-CredentialRotation' -ErrorAction Stop |
+            Where-Object { $_.Status -in @('Running', 'Starting', 'Activating') -and $_.JobId -ne $thisJobId }
+
+        if ($running) {
+            Write-Host "$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss')) [Warning] Another rotation job is already running ($($running[0].JobId)). Exiting so the two cannot fight over the same VM."
+            return
+        }
+    }
+    catch {
+        Write-Warning "Could not check for concurrent jobs, continuing: $($_.Exception.Message)"
+    }
+}
+
+# ---------------------------------------------------------------------------
+# run
+# ---------------------------------------------------------------------------
+
+$params = @{
+    VaultName             = $config.VaultName
+    ThresholdDays         = $config.ThresholdDays
+    ValidityDays          = $config.ValidityDays
+    EnableTagName         = $config.EnableTagName
+    EnableTagValue        = $config.EnableTagValue
+    SkipSshKeys           = $config.SkipSshKeys
+    RemovePriorSshKeys    = $config.RemovePriorSshKeys
+    ResetSshConfiguration = $config.ResetSshConfiguration
+    TriggeredBy           = 'automation'
+}
+if ($subscriptions) { $params['SubscriptionId'] = $subscriptions }
+foreach ($key in $optional.Keys) { $params[$key] = $optional[$key] }
+
+$summary = Invoke-CredentialRotation @params -WhatIf:$DryRun -Confirm:$false
+
+if ($DryRun) {
+    Write-Host "$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss')) [Warning] DRY RUN - nothing was changed"
+}
+
+# A runbook that swallows its errors reports Completed, and every alert built on job
+# status is then blind. Throw so the job status reflects reality.
+if ($summary.Failed -gt 0) {
+    throw "Credential rotation finished with $($summary.Failed) failure(s). See the job output for detail."
+}
+
+#endregion runbook
