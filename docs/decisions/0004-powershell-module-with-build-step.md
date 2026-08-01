@@ -13,7 +13,7 @@ project was written, and it made the logic effectively untestable.
 
 The source is a proper module, one function per file, under `src/CredentialRotation`.
 `build/Build-Runbook.ps1` concatenates it with the runbook wrapper into a single file
-in `dist/`, which is **committed** so deployment needs no build step. CI fails if the
+in `infra/modules/core/runbook/`, which is **committed** so deployment needs no build step. CI fails if the
 artefact and the sources drift apart.
 
 ## Why
@@ -36,7 +36,7 @@ storage account and a versioned zip to keep in sync, for the same result).
 
 ## Consequences
 
-- `dist/` must be rebuilt and committed whenever `src/` changes. CI enforces this
+- `infra/modules/core/runbook/` must be rebuilt and committed whenever `src/` changes. CI enforces this
   rather than trusting discipline.
 - The generated file is 60 KB and not meant to be read; the header says so.
 - The build parses the wrapper with the PowerShell language parser to split its

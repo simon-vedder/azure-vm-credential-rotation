@@ -172,6 +172,25 @@ Describe 'New-RotationSshKeyPair' {
     }
 }
 
+Describe 'ConvertFrom-PemToSshPublicKey' {
+
+    It 'recovers the public key from the private key alone' {
+        # Resuming an interrupted rotation has only the staged private key to work
+        # from. The public key cannot be stored beside it: Key Vault caps a tag value
+        # at 256 characters and an ssh-rsa key is several times that, which a live
+        # vault rejects with "Property has invalid value".
+        $pair = New-RotationSshKeyPair -KeySize 2048
+        ConvertFrom-PemToSshPublicKey -PrivateKeyPem $pair.PrivateKey | Should -Be $pair.PublicKey
+    }
+
+    It 'is stable across repeated derivations' {
+        $pair = New-RotationSshKeyPair -KeySize 2048
+        $first = ConvertFrom-PemToSshPublicKey -PrivateKeyPem $pair.PrivateKey
+        $second = ConvertFrom-PemToSshPublicKey -PrivateKeyPem $pair.PrivateKey
+        $first | Should -Be $second
+    }
+}
+
 Describe 'Resolve-SecretName' {
 
     It 'builds the documented shape' {

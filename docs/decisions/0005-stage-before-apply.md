@@ -42,15 +42,22 @@ read returns — so anyone fetching the credential mid-rotation would get one th
 does not have yet. Writing it disabled does not help: Key Vault returns an error for a
 disabled latest version rather than falling back to the previous one.
 
-**Why disabled and not deleted.** Key Vault soft-delete reserves a deleted name until
-it is purged, so deleting the staging secret would make the next rotation fail writing
-to that name. Purging needs an extra permission and is irreversible. Disabling costs
-nothing and is overwritten on the next rotation.
+**Why overwritten, and neither deleted nor disabled.** All three were tried against a
+real vault:
+
+- *deleted* — soft-delete reserves the name until it is purged, so the next rotation
+  fails writing to it. Purging needs another permission and is irreversible.
+- *disabled* — reads then fail with "Operation get is not allowed on a disabled
+  secret", a 403 that looks exactly like a missing role assignment. Because this
+  engine deliberately refuses to treat an unreadable secret as absent, one disabled
+  staging secret aborted discovery for an entire subscription.
+- *overwritten with a placeholder* — the value is gone, the metadata stays readable,
+  the name stays usable. This one.
 
 ## Consequences
 
-- Two secrets per credential in the vault. The staging one is disabled outside an
-  active rotation, and carries `State=consumed`.
+- Two secrets per credential in the vault. Outside an active rotation the staging one
+  holds a placeholder and carries `State=consumed`.
 - An interrupted rotation leaves a real credential readable in the staging secret until
   the next run closes it. It is covered by the same vault access controls, and this is
   the deliberate trade against losing it entirely.

@@ -135,17 +135,19 @@ Two related details, both learned the hard way:
 
 - Reading secret metadata distinguishes *absent* from *unreadable*. A denied role
   assignment must never be interpreted as "no secret here, better rotate".
-- The staging secret is disabled rather than deleted, because Key Vault soft-delete
-  reserves a deleted name until it is purged, and the next rotation would fail
-  writing to it.
+- The staging secret is overwritten once consumed, rather than deleted or disabled.
+  Deleting reserves the name until it is purged; disabling makes it unreadable, and
+  Key Vault reports that as a 403 indistinguishable from a missing role assignment -
+  which, since the engine refuses to treat an unreadable secret as absent, took down
+  discovery for a whole subscription during testing.
 
 ---
 
 ## Development
 
 ```bash
-pwsh -c './build/Build-Runbook.ps1'          # flatten src/ into dist/
-pwsh -c './build/Build-Runbook.ps1 -Check'   # verify dist/ matches src/  (CI)
+pwsh -c './build/Build-Runbook.ps1'          # flatten src/ into the core module
+pwsh -c './build/Build-Runbook.ps1 -Check'   # verify the artefact matches src/  (CI)
 pwsh -c 'Invoke-Pester ./tests'
 pwsh -c 'Invoke-ScriptAnalyzer -Path ./src -Recurse -Settings ./PSScriptAnalyzerSettings.psd1'
 terraform -chdir=infra/examples/02-full validate
@@ -153,7 +155,7 @@ terraform -chdir=infra/examples/02-full validate
 
 The logic lives in a proper PowerShell module under [`src/CredentialRotation`](src/CredentialRotation)
 so it can be tested and run locally. Azure Automation executes one script per job, so
-`build/Build-Runbook.ps1` flattens it into [`dist/`](dist), which is committed —
+`build/Build-Runbook.ps1` flattens it into [`infra/modules/core/runbook/`](infra/modules/core/runbook), which is committed —
 deploying needs no build step. CI fails if the two drift apart.
 
 Run it locally against a single VM before trusting a schedule:
@@ -168,14 +170,27 @@ Invoke-CredentialRotation -VaultName kv-creds -WhatIf
 
 ## Status and limits
 
-Version 0.1.0. The engine is tested, the SSH key generation is verified against
-`ssh-keygen`, and the Terraform validates — but **this has not yet been deployed
-against a live tenant end to end**. Specifically unverified:
+Version 0.1.0, **verified end to end against a live Azure tenant**: deployed from the
+Terraform in this repository, rotating a real VM through a real automation account.
 
-- the `AZKVAuditLogs` column names used by the access query, which differ from the
-  legacy `AzureDiagnostics` schema
-- the Logs Ingestion API round trip through the data collection rule
-- VMAccess behaviour on hardened Linux images
+Confirmed working on a Linux VM (Ubuntu 24.04):
+
+- password and SSH key rotation, both promoted into Key Vault with a 90-day expiry
+- opt-in discovery — one tagged VM found, an untagged one beside it correctly ignored
+- resume after an interrupted rotation, replaying a staged value from 25 minutes earlier
+- access-driven rotation: a human read detected in `AZKVAuditLogs`, expiry pulled
+  forward, credential replaced on the following pass
+- rotation records reaching a custom table through the Logs Ingestion API, and the
+  workbook query correlating reads with rotations
+
+Still unverified, and worth knowing before you rely on them:
+
+- **Windows.** The code path is there and mirrors the Linux one, but the live test ran
+  on Linux only.
+- **Hardened images.** VMAccess behaviour against a CIS-baselined host is untested.
+- **Scale.** Tested with one VM. Discovery reads secret metadata per credential, so
+  several hundred machines is where ARM throttling would first show up.
+- **Multi-subscription.** Single subscription only so far.
 
 Start in dry-run mode on machines you can afford to lock yourself out of.
 

@@ -52,6 +52,38 @@ function New-RotationSshKeyPair {
     }
 }
 
+function ConvertFrom-PemToSshPublicKey {
+    <#
+    .SYNOPSIS
+        Derives the "ssh-rsa" public key from a PKCS#8 private key PEM.
+
+    .DESCRIPTION
+        Used when resuming an interrupted rotation. The staged secret holds only the
+        private key, so the public key has to be recomputed rather than stored
+        alongside it - a 4096-bit ssh-rsa key is roughly 700 characters and Key Vault
+        caps a tag value at 256, so keeping it as a tag silently worked in testing and
+        failed against a real vault with "Property has invalid value".
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][securestring]$PrivateKeyPem
+    )
+
+    $pem = ConvertFrom-SecureString -SecureString $PrivateKeyPem -AsPlainText
+    $rsa = [System.Security.Cryptography.RSA]::Create()
+    try {
+        $rsa.ImportFromPem($pem)
+        $parameters = $rsa.ExportParameters($false)
+        return ConvertTo-OpenSshPublicKey -Exponent $parameters.Exponent -Modulus $parameters.Modulus
+    }
+    finally {
+        $rsa.Dispose()
+        $pem = $null
+        [System.GC]::Collect()
+    }
+}
+
 function ConvertTo-PemBlock {
     <#
     .SYNOPSIS

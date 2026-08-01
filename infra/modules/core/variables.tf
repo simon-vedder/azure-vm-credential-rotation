@@ -118,13 +118,27 @@ variable "dry_run" {
 }
 
 variable "log_verbose" {
-  description = "Enable verbose runbook logging."
+  description = <<-EOT
+    Enable the verbose job stream. Defaults to on, which is not the usual advice.
+
+    Azure Automation drops the verbose stream entirely when this is off, and verbose
+    is the only stream the rotation logic can write to that is both visible in the
+    portal and safe to use inside a function that returns a value - Write-Host and
+    Write-Information never reach the job streams at all, and Write-Output would make
+    every log line part of a function's return value.
+
+    The runbook silences $VerbosePreference before importing anything, so the Az
+    module chatter stays out and only the rotation's own lines come through.
+
+    Turn it off and you still get the run summary and any warnings or errors; you lose
+    the per-machine detail.
+  EOT
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "runbook_content" {
-  description = "Override the runbook body. Leave null to use the committed artefact in dist/."
+  description = "Override the runbook body. Leave null to use the committed artefact in runbook/."
   type        = string
   default     = null
 }

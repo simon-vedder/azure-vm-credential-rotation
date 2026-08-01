@@ -18,8 +18,14 @@ function Get-RotationSecret {
         reading the value keeps this call out of the SecretGet audit trail that the
         access-triggered rotation depends on.
 
+        A disabled secret is a third case, and it is not obvious: Key Vault answers a
+        read with 403 "Operation get is not allowed on a disabled secret". That looks
+        exactly like a permissions failure, so without special handling a single
+        disabled secret anywhere in the vault aborts discovery for the whole
+        subscription - which is precisely what happened on a live run.
+
     .OUTPUTS
-        PSCustomObject with Exists (bool) and Secret (the Key Vault secret, or $null).
+        PSCustomObject with Exists, Disabled and Secret (the Key Vault secret, or $null).
     #>
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -32,8 +38,9 @@ function Get-RotationSecret {
         $secret = Get-AzKeyVaultSecret -VaultName $VaultName -Name $Name -ErrorAction Stop
 
         return [pscustomobject]@{
-            Exists = $null -ne $secret
-            Secret = $secret
+            Exists   = $null -ne $secret
+            Disabled = $false
+            Secret   = $secret
         }
     }
     catch {
@@ -43,7 +50,13 @@ function Get-RotationSecret {
                       $_.Exception.Response.StatusCode -eq 404
 
         if ($isNotFound) {
-            return [pscustomobject]@{ Exists = $false; Secret = $null }
+            return [pscustomobject]@{ Exists = $false; Disabled = $false; Secret = $null }
+        }
+
+        # Disabled: the secret exists but cannot be read. Not a permissions problem,
+        # and not a reason to stop.
+        if ($_.Exception.Message -match 'disabled secret') {
+            return [pscustomobject]@{ Exists = $true; Disabled = $true; Secret = $null }
         }
 
         throw "Cannot read secret metadata '$Name' from vault '$VaultName'. Refusing to treat this as a missing secret. $($_.Exception.Message)"

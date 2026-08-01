@@ -45,6 +45,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Importing the Az modules emits several hundred verbose lines per job, which buries
+# everything useful. Silencing the preference keeps them out; Write-RotationLog passes
+# -Verbose explicitly so its own lines still come through.
+$VerbosePreference = 'SilentlyContinue'
+
 # ---------------------------------------------------------------------------
 # configuration helpers
 # ---------------------------------------------------------------------------
@@ -84,7 +89,7 @@ function Get-RunbookSetting {
 # Keeps contexts from leaking between concurrent jobs in the same sandbox.
 $null = Disable-AzContextAutosave -Scope Process
 
-Write-Host "$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss')) [Info] Connecting with the managed identity"
+Write-Verbose "$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss')) [Info] Connecting with the managed identity" -Verbose
 $null = Connect-AzAccount -Identity -ErrorAction Stop
 
 # ---------------------------------------------------------------------------
@@ -156,7 +161,7 @@ if ($accountName -and $accountRg -and $PSPrivateMetadata.JobId) {
             Where-Object { $_.Status -in @('Running', 'Starting', 'Activating') -and $_.JobId -ne $thisJobId }
 
         if ($running) {
-            Write-Host "$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss')) [Warning] Another rotation job is already running ($($running[0].JobId)). Exiting so the two cannot fight over the same VM."
+            Write-Warning "Another rotation job is already running ($($running[0].JobId)). Exiting so the two cannot fight over the same VM."
             return
         }
     }
@@ -186,8 +191,13 @@ foreach ($key in $optional.Keys) { $params[$key] = $optional[$key] }
 $summary = Invoke-CredentialRotation @params -WhatIf:$DryRun -Confirm:$false
 
 if ($DryRun) {
-    Write-Host "$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss')) [Warning] DRY RUN - nothing was changed"
+    Write-Warning 'DRY RUN - nothing was changed'
 }
+
+# The headline numbers go to the output stream, not the verbose one, so they survive
+# even if someone deploys with verbose logging turned off.
+Write-Output ("Rotation summary: candidates={0} rotated={1} skipped={2} failed={3} accessMarked={4} duration={5}" -f `
+    $summary.Candidates, $summary.Rotated, $summary.Skipped, $summary.Failed, $summary.AccessMarked, $summary.Duration.ToString('hh\:mm\:ss'))
 
 # A runbook that swallows its errors reports Completed, and every alert built on job
 # status is then blind. Throw so the job status reflects reality.

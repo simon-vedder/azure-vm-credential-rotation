@@ -113,7 +113,17 @@ function Get-RotationCandidate {
                 else {
                     $expiresOn = $secret.Secret.Expires.ToUniversalTime()
                     if (($expiresOn - $now).TotalDays -le $ThresholdDays) {
-                        $reason = 'Expiry'
+                        # Access-driven rotation works by pulling the expiry date
+                        # forward, so by the time it gets here it is indistinguishable
+                        # from ordinary ageing. Register-CredentialAccess leaves a tag
+                        # behind precisely so the audit record can still say which of
+                        # the two it was - without it, the workbook cannot answer
+                        # "was this replaced because someone read it, or because it
+                        # got old", which is most of the point of keeping records.
+                        $reason = if ($secret.Secret.Tags -and $secret.Secret.Tags['RotationReason'] -eq 'Access') {
+                            'Access'
+                        }
+                        else { 'Expiry' }
                     }
                 }
             }

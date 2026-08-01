@@ -159,8 +159,14 @@ function Get-RotationSecret {
         reading the value keeps this call out of the SecretGet audit trail that the
         access-triggered rotation depends on.
 
+        A disabled secret is a third case, and it is not obvious: Key Vault answers a
+        read with 403 "Operation get is not allowed on a disabled secret". That looks
+        exactly like a permissions failure, so without special handling a single
+        disabled secret anywhere in the vault aborts discovery for the whole
+        subscription - which is precisely what happened on a live run.
+
     .OUTPUTS
-        PSCustomObject with Exists (bool) and Secret (the Key Vault secret, or $null).
+        PSCustomObject with Exists, Disabled and Secret (the Key Vault secret, or $null).
     #>
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -173,8 +179,9 @@ function Get-RotationSecret {
         $secret = Get-AzKeyVaultSecret -VaultName $VaultName -Name $Name -ErrorAction Stop
 
         return [pscustomobject]@{
-            Exists = $null -ne $secret
-            Secret = $secret
+            Exists   = $null -ne $secret
+            Disabled = $false
+            Secret   = $secret
         }
     }
     catch {
@@ -184,7 +191,13 @@ function Get-RotationSecret {
                       $_.Exception.Response.StatusCode -eq 404
 
         if ($isNotFound) {
-            return [pscustomobject]@{ Exists = $false; Secret = $null }
+            return [pscustomobject]@{ Exists = $false; Disabled = $false; Secret = $null }
+        }
+
+        # Disabled: the secret exists but cannot be read. Not a permissions problem,
+        # and not a reason to stop.
+        if ($_.Exception.Message -match 'disabled secret') {
+            return [pscustomobject]@{ Exists = $true; Disabled = $true; Secret = $null }
         }
 
         throw "Cannot read secret metadata '$Name' from vault '$VaultName'. Refusing to treat this as a missing secret. $($_.Exception.Message)"
@@ -324,6 +337,38 @@ function New-RotationSshKeyPair {
         $rsa.Dispose()
         $pem = $null
         $parameters = $null
+    }
+}
+
+function ConvertFrom-PemToSshPublicKey {
+    <#
+    .SYNOPSIS
+        Derives the "ssh-rsa" public key from a PKCS#8 private key PEM.
+
+    .DESCRIPTION
+        Used when resuming an interrupted rotation. The staged secret holds only the
+        private key, so the public key has to be recomputed rather than stored
+        alongside it - a 4096-bit ssh-rsa key is roughly 700 characters and Key Vault
+        caps a tag value at 256, so keeping it as a tag silently worked in testing and
+        failed against a real vault with "Property has invalid value".
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][securestring]$PrivateKeyPem
+    )
+
+    $pem = ConvertFrom-SecureString -SecureString $PrivateKeyPem -AsPlainText
+    $rsa = [System.Security.Cryptography.RSA]::Create()
+    try {
+        $rsa.ImportFromPem($pem)
+        $parameters = $rsa.ExportParameters($false)
+        return ConvertTo-OpenSshPublicKey -Exponent $parameters.Exponent -Modulus $parameters.Modulus
+    }
+    finally {
+        $rsa.Dispose()
+        $pem = $null
+        [System.GC]::Collect()
     }
 }
 
@@ -517,16 +562,27 @@ function Write-RotationLog {
         Writes a structured line to the job log.
 
     .DESCRIPTION
-        Uses Write-Host, not Write-Output.
+        Uses Write-Verbose with an explicit -Verbose, which is the only option that is
+        both visible in Azure Automation and safe inside a function that returns a
+        value. Measured against a real automation account, PowerShell 7.2 runbook:
 
-        Write-Output looks like the right choice for Azure Automation - it lands in the
-        job output stream, which is what you read in the portal. But it also writes to
-        the success stream, so every log line from a function becomes part of that
-        function's return value. A function that logs twice and returns one object
-        actually returns three things, and the caller silently gets a mess.
+            Write-Output        visible, but writes to the success stream, so every
+                                log line becomes part of the calling function's return
+                                value - our own tests caught exactly that
+            Write-Host          never appears in the job streams at all
+            Write-Information   never appears either, with or without
+                                -InformationAction Continue
+            Write-Verbose       appears as a Verbose stream, leaves the pipeline alone
+            Write-Warning       appears, but everything would be a warning
 
-        Write-Host writes to the information stream, which Automation also surfaces in
-        the job output, without touching the pipeline.
+        The catch: Automation drops the verbose stream entirely unless the runbook has
+        logVerbose enabled, which is why the core Terraform module defaults it to true.
+        The runbook wrapper sets $VerbosePreference to SilentlyContinue first, so the
+        Az module import chatter - several hundred lines per job - stays out, while
+        these explicit calls still come through.
+
+        The run summary additionally goes to the output stream, so the headline numbers
+        survive even if someone turns verbose logging off.
 
         Never pass credential material into this function.
     #>
@@ -544,10 +600,13 @@ function Write-RotationLog {
     $timestamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss')
     $prefix = if ($Scope) { "[$Level] [$Scope]" } else { "[$Level]" }
 
-    Write-Host "$timestamp $prefix $Message"
+    # -Verbose explicitly: the wrapper silences $VerbosePreference to keep the Az
+    # module import chatter out of the job, and these lines have to survive that.
+    Write-Verbose "$timestamp $prefix $Message" -Verbose
 
-    # Also surface warnings and errors on their own streams, so a failing job is
-    # visible in the portal without reading the whole output.
+    # Warnings and errors also go to their own streams, which Automation surfaces
+    # regardless of the verbose setting - so a failing job is legible even with
+    # verbose logging turned off.
     switch ($Level) {
         'Warning' { Write-Warning $Message }
         'Error' { Write-Error -Message $Message -ErrorAction Continue }
@@ -772,7 +831,17 @@ function Get-RotationCandidate {
                 else {
                     $expiresOn = $secret.Secret.Expires.ToUniversalTime()
                     if (($expiresOn - $now).TotalDays -le $ThresholdDays) {
-                        $reason = 'Expiry'
+                        # Access-driven rotation works by pulling the expiry date
+                        # forward, so by the time it gets here it is indistinguishable
+                        # from ordinary ageing. Register-CredentialAccess leaves a tag
+                        # behind precisely so the audit record can still say which of
+                        # the two it was - without it, the workbook cannot answer
+                        # "was this replaced because someone read it, or because it
+                        # got old", which is most of the point of keeping records.
+                        $reason = if ($secret.Secret.Tags -and $secret.Secret.Tags['RotationReason'] -eq 'Access') {
+                            'Access'
+                        }
+                        else { 'Expiry' }
                     }
                 }
             }
@@ -1107,16 +1176,15 @@ function Update-VMCredential {
             1. write the new value to <name>-pending, tagged State=pending
             2. apply it to the VM through the VMAccess extension
             3. write it to <name> with the real expiry
-            4. mark <name>-pending as consumed and disable that version
+            4. overwrite <name>-pending with a placeholder, tagged State=consumed
 
         Any crash leaves the value recoverable. If the run dies between 2 and 3, the
         next run finds an open pending secret, reapplies the same value to the VM
         (idempotent) and promotes it. Callers see <name> only ever holding a value
         the VM has actually accepted.
 
-        The pending secret is disabled rather than deleted, because Key Vault
-        soft-delete keeps a deleted name reserved and the next write to it would
-        fail until purged.
+        The staging secret is overwritten rather than deleted or disabled - see
+        Close-PendingCredential for why both of those fail against a real vault.
 
     .PARAMETER RemovePriorSshKeys
         Defaults to false, deliberately. The VMAccess extension can wipe every entry
@@ -1190,7 +1258,10 @@ function Update-VMCredential {
     if ($pending.IsOpen) {
         Write-RotationLog -Message "Resuming an interrupted rotation from $($pending.CreatedAt)" -Level Warning -Scope $VM.Name
         $secretValue = $pending.Value
-        $publicKey = $pending.PublicKey
+        $publicKey = if ($CredentialType -eq 'SSHKey') {
+            ConvertFrom-PemToSshPublicKey -PrivateKeyPem $secretValue
+        }
+        else { $null }
     }
     else {
         if ($CredentialType -eq 'Password') {
@@ -1203,13 +1274,15 @@ function Update-VMCredential {
             $publicKey = $keyPair.PublicKey
         }
 
+        # No public key here: Key Vault caps a tag value at 256 characters and an
+        # ssh-rsa key is several times that. On resume it is derived from the staged
+        # private key instead.
         $pendingTags = @{
             State     = 'pending'
             VMName    = $VM.Name
             AdminName = $adminUsername
             CreatedAt = $startedAt.ToString('o')
         }
-        if ($publicKey) { $pendingTags['PublicKey'] = $publicKey }
 
         $null = Set-AzKeyVaultSecret -VaultName $VaultName -Name $pendingName `
             -SecretValue $secretValue `
@@ -1235,12 +1308,16 @@ function Update-VMCredential {
     }
 
     # ---- 3. promote ---------------------------------------------------------
+    # Tags are replaced wholesale, which also clears RotationReason from a previous
+    # access-driven cycle. Leaving it in place would make every later rotation of this
+    # secret claim to have been triggered by a read.
     $tags = @{
         VMName         = $VM.Name
         AdminName      = $adminUsername
         OSType         = $osType
         CredentialType = $CredentialType
         LastRotated    = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd')
+        LastTrigger    = $TriggerReason
         RotatedBy      = 'azure-vm-credential-rotation'
     }
 
@@ -1261,7 +1338,7 @@ function Update-VMCredential {
     }
 
     # ---- 4. close the staging secret ---------------------------------------
-    Close-PendingCredential -VaultName $VaultName -PendingName $pendingName -Version $pending.Version
+    Close-PendingCredential -VaultName $VaultName -PendingName $pendingName
 
     Write-RotationLog -Message "Rotated $CredentialType, new version $($new.Version), expires in $ValidityDays days" -Level Success -Scope $VM.Name
 
@@ -1284,15 +1361,14 @@ function Get-PendingCredential {
     $result = [pscustomobject]@{
         IsOpen    = $false
         Value     = $null
-        PublicKey = $null
         Version   = $null
         CreatedAt = $null
     }
 
     $meta = Get-RotationSecret -VaultName $VaultName -Name $PendingName
     if (-not $meta.Exists) { return $result }
+    if ($meta.Disabled) { return $result }
     if ($meta.Secret.Tags.State -ne 'pending') { return $result }
-    if ($meta.Secret.Enabled -eq $false) { return $result }
 
     # Reading the staged value is a SecretGet by the managed identity. It carries no
     # upn claim, so it never registers as human access.
@@ -1300,7 +1376,6 @@ function Get-PendingCredential {
 
     $result.IsOpen = $true
     $result.Value = $full.SecretValue
-    $result.PublicKey = $meta.Secret.Tags.PublicKey
     $result.Version = $meta.Secret.Version
     $result.CreatedAt = $meta.Secret.Tags.CreatedAt
 
@@ -1310,35 +1385,48 @@ function Get-PendingCredential {
 function Close-PendingCredential {
     <#
     .SYNOPSIS
-        Marks a staged credential as consumed.
+        Marks a staged credential as consumed and removes its value.
 
     .DESCRIPTION
-        Disables the version and retags it rather than deleting the secret. Key Vault
-        soft-delete keeps a deleted name reserved until it is purged, and the next
-        rotation would fail trying to write to that name.
+        Overwrites the staging secret with a placeholder rather than deleting or
+        disabling it. All three options were tried against a real vault; only this one
+        works:
+
+          delete   Key Vault soft-delete reserves the name until it is purged, so the
+                   next rotation fails writing to it. Purging needs another permission
+                   and is irreversible.
+
+          disable  reads then fail with "Operation get is not allowed on a disabled
+                   secret" - a 403, indistinguishable at a glance from a missing role
+                   assignment. Since the engine deliberately refuses to treat an
+                   unreadable secret as absent, one disabled staging secret took down
+                   discovery for the entire subscription.
+
+          overwrite  the value is gone, the metadata stays readable, the name stays
+                     usable. This one.
+
+        The previous version still holds the credential, reachable only by explicit
+        version id - but that is the same value now stored in the live secret, so it
+        adds no exposure.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$VaultName,
-        [Parameter(Mandatory)][string]$PendingName,
-        [string]$Version
+        [Parameter(Mandatory)][string]$PendingName
     )
 
     try {
-        $params = @{
-            VaultName   = $VaultName
-            Name        = $PendingName
-            Enable      = $false
-            Tag         = @{ State = 'consumed'; ConsumedAt = (Get-Date).ToUniversalTime().ToString('o') }
-            ErrorAction = 'Stop'
-        }
-        if ($Version) { $params['Version'] = $Version }
+        $placeholder = ConvertTo-SecureString -String 'consumed' -AsPlainText -Force
 
-        $null = Update-AzKeyVaultSecret @params
+        $null = Set-AzKeyVaultSecret -VaultName $VaultName -Name $PendingName `
+            -SecretValue $placeholder `
+            -Expires (Get-Date).ToUniversalTime().AddDays(1) `
+            -Tag @{ State = 'consumed'; ConsumedAt = (Get-Date).ToUniversalTime().ToString('o') } `
+            -ErrorAction Stop
     }
     catch {
-        # The credential is safely in place at this point; a stale pending marker is
-        # cosmetic and will be overwritten by the next rotation.
+        # The credential is safely in place at this point; a stale staging marker is
+        # cosmetic and gets overwritten by the next rotation.
         Write-RotationLog -Message "Could not close staging secret '$PendingName': $($_.Exception.Message)" -Level Warning
     }
 }
@@ -1353,6 +1441,25 @@ function Set-VMAccessCredential {
         OS profile no longer exists on the machine, VMAccess recreates it as a local
         administrator. Someone may have removed or renamed that account on purpose.
         See docs/threat-model.md.
+
+        Two hard-won details, both found on a live tenant and neither obvious:
+
+        1. Settings are passed as JSON strings, not hashtables. Handing a hashtable to
+           -ProtectedSettings works fine with a current Az module and fails inside an
+           Azure Automation sandbox running an older one, where the extension receives
+           a nested object and reports:
+
+               Enable failed: crypt() argument 1 must be str, not dict
+
+           The same call, same password, succeeded locally on Az.Accounts 5.5 and
+           failed on the sandbox's 2.15. Serialising explicitly removes the module
+           version from the equation entirely.
+
+        2. On Linux the optional keys are omitted rather than sent as false, because
+           the extension branches on whether a key is *present*, not on its value.
+
+        The Linux extension is also picky about an absent settings object, so an empty
+        one is always sent - matching what "az vm user update" does.
     #>
     [CmdletBinding()]
     param(
@@ -1382,8 +1489,8 @@ function Set-VMAccessCredential {
                 -Publisher 'Microsoft.Compute' `
                 -ExtensionType 'VMAccessAgent' `
                 -TypeHandlerVersion '2.4' `
-                -Settings @{ UserName = $AdminUsername } `
-                -ProtectedSettings @{ Password = $plain }
+                -SettingString (ConvertTo-Json -InputObject @{ UserName = $AdminUsername } -Compress) `
+                -ProtectedSettingString (ConvertTo-Json -InputObject @{ Password = $plain } -Compress)
         }
         finally {
             $plain = $null
@@ -1397,15 +1504,17 @@ function Set-VMAccessCredential {
     if ($CredentialType -eq 'Password') {
         $plain = ConvertFrom-SecureString -SecureString $SecretValue -AsPlainText
         $protected['password'] = $plain
-        $protected['reset_ssh'] = $false
+        # No reset_ssh here at all - see the note above.
     }
     else {
         if ([string]::IsNullOrWhiteSpace($PublicKey)) {
             throw 'SSH rotation requires a public key.'
         }
         $protected['ssh_key'] = $PublicKey
-        $protected['reset_ssh'] = [bool]$ResetSshConfiguration
-        $protected['remove_prior_keys'] = [bool]$RemovePriorSshKeys
+
+        # Present only when actually wanted, for the same reason.
+        if ($ResetSshConfiguration) { $protected['reset_ssh'] = $true }
+        if ($RemovePriorSshKeys) { $protected['remove_prior_keys'] = $true }
     }
 
     try {
@@ -1414,10 +1523,12 @@ function Set-VMAccessCredential {
             -Publisher 'Microsoft.OSTCExtensions' `
             -ExtensionType 'VMAccessForLinux' `
             -TypeHandlerVersion '1.5' `
-            -ProtectedSettings $protected
+            -SettingString '{}' `
+            -ProtectedSettingString (ConvertTo-Json -InputObject $protected -Compress)
     }
     finally {
         $protected['password'] = $null
+        $protected = $null
         $plain = $null
         [System.GC]::Collect()
     }
@@ -1428,6 +1539,11 @@ function Set-VMAccessCredential {
 #region runbook
 
 $ErrorActionPreference = 'Stop'
+
+# Importing the Az modules emits several hundred verbose lines per job, which buries
+# everything useful. Silencing the preference keeps them out; Write-RotationLog passes
+# -Verbose explicitly so its own lines still come through.
+$VerbosePreference = 'SilentlyContinue'
 
 # ---------------------------------------------------------------------------
 # configuration helpers
@@ -1468,7 +1584,7 @@ function Get-RunbookSetting {
 # Keeps contexts from leaking between concurrent jobs in the same sandbox.
 $null = Disable-AzContextAutosave -Scope Process
 
-Write-Host "$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss')) [Info] Connecting with the managed identity"
+Write-Verbose "$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss')) [Info] Connecting with the managed identity" -Verbose
 $null = Connect-AzAccount -Identity -ErrorAction Stop
 
 # ---------------------------------------------------------------------------
@@ -1540,7 +1656,7 @@ if ($accountName -and $accountRg -and $PSPrivateMetadata.JobId) {
             Where-Object { $_.Status -in @('Running', 'Starting', 'Activating') -and $_.JobId -ne $thisJobId }
 
         if ($running) {
-            Write-Host "$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss')) [Warning] Another rotation job is already running ($($running[0].JobId)). Exiting so the two cannot fight over the same VM."
+            Write-Warning "Another rotation job is already running ($($running[0].JobId)). Exiting so the two cannot fight over the same VM."
             return
         }
     }
@@ -1570,8 +1686,13 @@ foreach ($key in $optional.Keys) { $params[$key] = $optional[$key] }
 $summary = Invoke-CredentialRotation @params -WhatIf:$DryRun -Confirm:$false
 
 if ($DryRun) {
-    Write-Host "$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss')) [Warning] DRY RUN - nothing was changed"
+    Write-Warning 'DRY RUN - nothing was changed'
 }
+
+# The headline numbers go to the output stream, not the verbose one, so they survive
+# even if someone deploys with verbose logging turned off.
+Write-Output ("Rotation summary: candidates={0} rotated={1} skipped={2} failed={3} accessMarked={4} duration={5}" -f `
+    $summary.Candidates, $summary.Rotated, $summary.Skipped, $summary.Failed, $summary.AccessMarked, $summary.Duration.ToString('hh\:mm\:ss'))
 
 # A runbook that swallows its errors reports Completed, and every alert built on job
 # status is then blind. Throw so the job status reflects reality.

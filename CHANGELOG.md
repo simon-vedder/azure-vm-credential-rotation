@@ -1,9 +1,45 @@
 # Changelog
 
-## [0.1.0] — 2026-07-31
+## [0.1.0] — 2026-08-01
 
-Initial release. Not yet deployed against a live tenant end to end; see the status
-section in the README for what remains unverified.
+Initial release, verified end to end against a live Azure tenant. See the status
+section in the README for what that covered and what it did not.
+
+### Found by the live test
+
+Everything below passed unit tests, PSScriptAnalyzer and `terraform validate` before
+being deployed, and broke anyway. Recorded because each one is a trap for anyone
+building something similar.
+
+- **`for_each` over scope IDs** could not be planned when the caller creates the
+  resource group in the same apply — the common case. Now `count`.
+- **`file()` reaching outside the module** worked with a local relative `source` and
+  would have broken for anyone consuming the module from a git URL, exactly as the
+  README suggests. The runbook artefact now lives inside the core module.
+- **Empty automation variables** are rejected by the provider. Filtering them with a
+  comprehension made the map's keys unknown at plan time, so the optional entry is
+  merged in instead.
+- **`Write-Host` and `Write-Information` never appear in Azure Automation job
+  streams.** Measured directly: of the five ways to log, only Output, Verbose and
+  Warning arrive. Verbose is the only one that is both visible and safe inside a
+  function that returns a value, and Automation drops it entirely unless the runbook
+  has `logVerbose` on — hence that default.
+- **Hashtables passed to `-ProtectedSettings`** serialise differently depending on the
+  Az module version. Identical call and password: fine on Az.Accounts 5.5 locally,
+  and inside the sandbox's 2.15 the extension received a nested object and failed with
+  `crypt() argument 1 must be str, not dict`. Settings are now built as explicit JSON.
+- **A public key does not fit in a Key Vault tag** (256 characters). On resume it is
+  derived from the staged private key instead.
+- **Disabled secrets cannot be read** — Key Vault answers with a 403 that reads like a
+  permissions failure. Since the engine deliberately refuses to treat an unreadable
+  secret as absent, one disabled staging secret took down discovery for an entire
+  subscription. Staging secrets are now overwritten rather than disabled.
+- **The `Automation Job Operator` role was missing**, so the concurrency check threw,
+  was caught, and silently protected nothing.
+- **Access-driven rotations were recorded as `Expiry`**, because access works by
+  moving the expiry date. A tag now carries the real reason through, so the audit
+  trail can distinguish "replaced because someone read it" from "replaced because it
+  got old".
 
 ### Added
 

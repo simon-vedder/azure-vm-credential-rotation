@@ -47,7 +47,7 @@ jobs:
 
       - name: Verify the deployable artefact matches the sources
         shell: pwsh
-        # dist/ is committed so Terraform can deploy without a build step. If someone
+        # The runbook artefact is committed so Terraform can deploy without a build step. If someone
         # edits src/ and forgets to rebuild, the deployed runbook silently lags behind
         # the code that was reviewed - so fail here instead.
         run: ./build/Build-Runbook.ps1 -Check

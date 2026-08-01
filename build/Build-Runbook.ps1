@@ -10,8 +10,9 @@
 
     So the source stays a proper module: one function per file, testable with Pester,
     loadable locally with Import-Module. This script concatenates it into the single
-    file that Terraform deploys. The output is committed to the repository so the
-    infrastructure can be deployed without a build step.
+    file that Terraform deploys, at infra/modules/core/runbook/. The output is
+    committed to the repository so the infrastructure can be deployed without a build
+    step.
 
     The one subtlety: a param() block must be the first statement in a script, so the
     wrapper's parameters cannot simply be appended after the function definitions.
@@ -24,7 +25,12 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$OutputPath = (Join-Path $PSScriptRoot '..' 'dist' 'Invoke-CredentialRotation.runbook.ps1'),
+    # The artefact lives inside the core module, not in a top-level dist/. Terraform's
+    # file() only reads files that are part of the module's own source: a path that
+    # escapes the module directory works with a local relative source and breaks the
+    # moment someone consumes the module from a git URL, because Terraform copies only
+    # the module directory.
+    [string]$OutputPath = (Join-Path $PSScriptRoot '..' 'infra' 'modules' 'core' 'runbook' 'Invoke-CredentialRotation.ps1'),
 
     # Verify the committed artefact matches the sources instead of writing it.
     [switch]$Check
@@ -124,15 +130,15 @@ if ($genErrors.Count -gt 0) {
 
 if ($Check) {
     if (-not (Test-Path $OutputPath)) {
-        throw 'dist/ artefact is missing. Run ./build/Build-Runbook.ps1'
+        throw 'runbook artefact is missing. Run ./build/Build-Runbook.ps1'
     }
 
     $existing = ((Get-Content -Path $OutputPath -Raw) -replace "`r`n", "`n").TrimEnd()
     if ($existing -ne $content.TrimEnd()) {
-        throw 'dist/ artefact is out of date. Run ./build/Build-Runbook.ps1 and commit the result.'
+        throw 'runbook artefact is out of date. Run ./build/Build-Runbook.ps1 and commit the result.'
     }
 
-    Write-Host 'dist/ artefact is up to date.' -ForegroundColor Green
+    Write-Host 'runbook artefact is up to date.' -ForegroundColor Green
     return
 }
 

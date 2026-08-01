@@ -92,15 +92,17 @@ the credential reaches the machine but not the vault.
 1. write value ──▶ <name>-pending          value is now recoverable
 2. apply to VM                             machine and vault both know it
 3. write value ──▶ <name>                  callers see it
-4. disable <name>-pending                  staging closed
+4. overwrite <name>-pending               staging closed
 ```
 
 A crash after 2 leaves an open staging secret. The next run finds it, re-applies the
 same value (idempotent) and promotes it, rather than generating a third credential
 nobody has.
 
-The staging secret is disabled, not deleted: Key Vault soft-delete reserves a deleted
-name until it is purged, so deleting it would break the next rotation.
+The staging secret is overwritten with a placeholder once consumed - not deleted, and
+not disabled. Deleting reserves the name until it is purged; disabling makes the
+secret unreadable, and Key Vault reports that as a 403 that is hard to tell apart
+from a missing permission.
 
 ## Independently deployable modules
 
