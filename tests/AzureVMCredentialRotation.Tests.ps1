@@ -344,3 +344,123 @@ Describe 'New-RotationRecord' {
             -TriggerReason 'Expiry' -Result 'Something' } | Should -Throw
     }
 }
+
+Describe 'Resolve-TargetVM' {
+
+    BeforeAll {
+        function Get-AzVM { param($Name, $ResourceGroupName, $ErrorAction) }
+    }
+
+    It 'says which resource groups an ambiguous name is in' {
+        Mock Get-AzVM {
+            @(
+                [pscustomobject]@{ Name = 'jump-01'; ResourceGroupName = 'rg-a' }
+                [pscustomobject]@{ Name = 'jump-01'; ResourceGroupName = 'rg-b' }
+            )
+        }
+
+        # Picking the first match would rotate a credential on a machine nobody named.
+        { Resolve-TargetVM -Name 'jump-01' } | Should -Throw -ExpectedMessage '*rg-a, rg-b*'
+    }
+
+    It 'says the name was not found rather than returning nothing' {
+        Mock Get-AzVM { @() }
+        { Resolve-TargetVM -Name 'nope' } | Should -Throw -ExpectedMessage "*No VM named 'nope'*"
+    }
+
+    It 'fetches the machine again by resource group, because the list form has no OSProfile' {
+        Mock Get-AzVM -ParameterFilter { $null -eq $ResourceGroupName } -MockWith {
+            @([pscustomobject]@{ Name = 'jump-01'; ResourceGroupName = 'rg-a' })
+        }
+        Mock Get-AzVM -ParameterFilter { $ResourceGroupName -eq 'rg-a' } -MockWith {
+            [pscustomobject]@{ Name = 'jump-01'; ResourceGroupName = 'rg-a'; OSProfile = @{ AdminUsername = 'azureuser' } }
+        }
+
+        $vm = Resolve-TargetVM -Name 'jump-01'
+
+        $vm.OSProfile.AdminUsername | Should -Be 'azureuser'
+        Should -Invoke Get-AzVM -Times 1 -Exactly -ParameterFilter { $ResourceGroupName -eq 'rg-a' }
+    }
+
+    It 'does not search the subscription when the resource group is given' {
+        Mock Get-AzVM { [pscustomobject]@{ Name = 'jump-01'; ResourceGroupName = 'rg-a' } }
+        $null = Resolve-TargetVM -Name 'jump-01' -ResourceGroupName 'rg-a'
+        Should -Invoke Get-AzVM -Times 1 -Exactly
+    }
+}
+
+Describe 'Get-RotationCandidate with an explicitly named VM' {
+
+    BeforeAll {
+        function Get-AzVM { param($Name, $ResourceGroupName, $ErrorAction) }
+
+        $script:LinuxVM = [pscustomobject]@{
+            Name              = 'jump-01'
+            ResourceGroupName = 'rg-a'
+            Id                = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-a/providers/Microsoft.Compute/virtualMachines/jump-01'
+            Tags              = @{}
+            OSProfile         = [pscustomobject]@{
+                AdminUsername      = 'azureuser'
+                LinuxConfiguration = [pscustomobject]@{ DisablePasswordAuthentication = $true }
+            }
+            StorageProfile    = [pscustomobject]@{ OsDisk = [pscustomobject]@{ OsType = 'Linux' } }
+        }
+    }
+
+    BeforeEach {
+        # No pending secret, and a live secret nowhere near its expiry date.
+        Mock Get-RotationSecret {
+            if ($Name -like '*pending*') { return [pscustomobject]@{ Exists = $false; Secret = $null } }
+            return [pscustomobject]@{
+                Exists = $true
+                Secret = [pscustomobject]@{
+                    Version = 'v1'
+                    Enabled = $true
+                    Expires = (Get-Date).ToUniversalTime().AddDays(300)
+                    Tags    = @{}
+                }
+            }
+        }
+    }
+
+    It 'never calls Get-AzVM, because the machine was handed to it' {
+        Mock Get-AzVM { throw 'discovery must not run for a named machine' }
+        { Get-RotationCandidate -VaultName 'kv' -VM $script:LinuxVM } | Should -Not -Throw
+    }
+
+    It 'rotates a machine with no enable tag' {
+        $result = @(Get-RotationCandidate -VaultName 'kv' -VM $script:LinuxVM)
+        $result.Count | Should -BeGreaterThan 0
+        $result[0].VM.Name | Should -Be 'jump-01'
+    }
+
+    It 'reports Manual, not Expiry, for a secret that is nowhere near expiring' {
+        # The whole point of naming a machine: the threshold must not silently do nothing.
+        $result = @(Get-RotationCandidate -VaultName 'kv' -VM $script:LinuxVM)
+        $result[0].Reason | Should -Be 'Manual'
+    }
+
+    It 'finds nothing for the same machine through ordinary discovery' {
+        Mock Get-AzVM { @($script:LinuxVM) }
+        # Untagged and 300 days from expiry: neither condition applies.
+        @(Get-RotationCandidate -VaultName 'kv') | Should -BeNullOrEmpty
+    }
+
+    It 'still respects the hold tag' {
+        $held = $script:LinuxVM.PSObject.Copy()
+        $held.Tags = @{ CredentialRotationHold = 'true' }
+        @(Get-RotationCandidate -VaultName 'kv' -VM $held) | Should -BeNullOrEmpty
+    }
+
+    It 'overrides the hold tag only when asked' {
+        $held = $script:LinuxVM.PSObject.Copy()
+        $held.Tags = @{ CredentialRotationHold = 'true' }
+        @(Get-RotationCandidate -VaultName 'kv' -VM $held -IgnoreHold).Count | Should -BeGreaterThan 0
+    }
+
+    It 'still reports a missing secret as Missing' {
+        Mock Get-RotationSecret { [pscustomobject]@{ Exists = $false; Secret = $null } }
+        $result = @(Get-RotationCandidate -VaultName 'kv' -VM $script:LinuxVM)
+        $result[0].Reason | Should -Be 'Missing'
+    }
+}

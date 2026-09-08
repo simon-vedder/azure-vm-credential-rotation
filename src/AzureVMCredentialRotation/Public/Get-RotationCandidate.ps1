@@ -12,13 +12,25 @@ function Get-RotationCandidate {
         machine it can see - including the ones whose credentials live in a CMDB or a
         password manager that nobody told it about.
 
-        Rotation is triggered by one of four conditions:
+        Rotation is triggered by one of five conditions:
 
           ResumePending - a previous run was interrupted after staging a value
           Missing       - no secret yet, or a secret with no expiry date
           Expiry        - the expiry date is within the threshold
           Access        - not detected here; access pulls the expiry date forward,
                           and this function then sees it as Expiry
+          Manual        - a VM was named explicitly through -VM, so it is rotated
+                          whatever its expiry date says
+
+    .PARAMETER VM
+        Rotate these VMs instead of discovering tagged ones. Naming a machine is a
+        stronger statement of intent than a tag, so the enable tag is not required and
+        the expiry threshold does not apply - the reason becomes Manual. The hold tag
+        still applies, because it means somebody is working on that machine.
+
+    .PARAMETER IgnoreHold
+        Rotate even a VM carrying the hold tag. Only meaningful with -VM: a scheduled
+        run must never talk itself out of a hold.
 
         The last point is the design in one sentence: the expiry date is the only
         signal. Everything else writes to it.
@@ -30,6 +42,11 @@ function Get-RotationCandidate {
     [OutputType([pscustomobject])]
     param(
         [Parameter(Mandatory)][string]$VaultName,
+
+        # Explicit machines instead of tag discovery. See the note on -VM in the help.
+        [ValidateNotNullOrEmpty()][object[]]$VM,
+
+        [switch]$IgnoreHold,
 
         [ValidateRange(0, 3650)][int]$ThresholdDays = 14,
 
@@ -44,18 +61,35 @@ function Get-RotationCandidate {
     $candidates = [System.Collections.Generic.List[object]]::new()
     $now = (Get-Date).ToUniversalTime()
 
-    $vms = @(Get-AzVM -ErrorAction Stop | Where-Object {
-        $_.Tags -and
-        $_.Tags.ContainsKey($EnableTagName) -and
-        $_.Tags[$EnableTagName] -eq $EnableTagValue
-    })
+    # Named machines skip discovery entirely. The tag exists to stop a scheduled run
+    # reaching further than intended; it has nothing to protect when a person types the name.
+    $explicit = $PSBoundParameters.ContainsKey('VM')
 
-    Write-RotationLog -Message "$($vms.Count) VM(s) tagged $EnableTagName=$EnableTagValue in this subscription" -Level Info -Scope 'discovery'
+    $vms = if ($explicit) {
+        @($VM)
+    }
+    else {
+        @(Get-AzVM -ErrorAction Stop | Where-Object {
+            $_.Tags -and
+            $_.Tags.ContainsKey($EnableTagName) -and
+            $_.Tags[$EnableTagName] -eq $EnableTagValue
+        })
+    }
+
+    if ($explicit) {
+        Write-RotationLog -Message "$($vms.Count) VM(s) named explicitly, tag discovery skipped" -Level Info -Scope 'discovery'
+    }
+    else {
+        Write-RotationLog -Message "$($vms.Count) VM(s) tagged $EnableTagName=$EnableTagValue in this subscription" -Level Info -Scope 'discovery'
+    }
 
     foreach ($vm in $vms) {
-        if ($vm.Tags.ContainsKey($HoldTagName) -and $vm.Tags[$HoldTagName] -eq 'true') {
-            Write-RotationLog -Message "On hold via $HoldTagName, skipping" -Level Warning -Scope $vm.Name
-            continue
+        if ($vm.Tags -and $vm.Tags.ContainsKey($HoldTagName) -and $vm.Tags[$HoldTagName] -eq 'true') {
+            if (-not $IgnoreHold) {
+                Write-RotationLog -Message "On hold via $HoldTagName, skipping" -Level Warning -Scope $vm.Name
+                continue
+            }
+            Write-RotationLog -Message "On hold via $HoldTagName, overridden by -IgnoreHold" -Level Warning -Scope $vm.Name
         }
 
         $adminUsername = $vm.OSProfile.AdminUsername
@@ -102,13 +136,19 @@ function Get-RotationCandidate {
                 if (-not $secret.Exists) {
                     $reason = 'Missing'
                 }
-                elseif ($secret.Secret.Tags -and $secret.Secret.Tags[$HoldTagName] -eq 'true') {
+                elseif ($secret.Secret.Tags -and $secret.Secret.Tags[$HoldTagName] -eq 'true' -and -not $IgnoreHold) {
                     Write-RotationLog -Message "Secret '$secretName' is on hold, skipping" -Level Warning -Scope $vm.Name
                     continue
                 }
                 elseif ($null -eq $secret.Secret.Expires) {
                     $reason = 'Missing'
                     Write-RotationLog -Message "Secret '$secretName' has no expiry date" -Level Warning -Scope $vm.Name
+                }
+                elseif ($explicit) {
+                    # Named on the command line: rotate it, whatever the expiry says. Anything
+                    # else would silently do nothing for a machine somebody asked about.
+                    $expiresOn = $secret.Secret.Expires.ToUniversalTime()
+                    $reason = 'Manual'
                 }
                 else {
                     $expiresOn = $secret.Secret.Expires.ToUniversalTime()

@@ -10,21 +10,20 @@ in an established tenant, change the local administrator password of every
 machine it can see - including the ones whose credentials live in a CMDB or a
 password manager that nobody told it about.
 
-Rotation is triggered by one of four conditions:
+Rotation is triggered by one of five conditions:
 
   ResumePending - a previous run was interrupted after staging a value
   Missing       - no secret yet, or a secret with no expiry date
   Expiry        - the expiry date is within the threshold
   Access        - not detected here; access pulls the expiry date forward,
                   and this function then sees it as Expiry
-
-The last point is the design in one sentence: the expiry date is the only
-signal. Everything else writes to it.
+  Manual        - a VM was named explicitly through -VM, so it is rotated
+                  whatever its expiry date says
 
 ## Syntax
 
 ```powershell
-Get-RotationCandidate [-VaultName] <string> [[-ThresholdDays] <int>] [[-EnableTagName] <string>] [[-EnableTagValue] <string>] [[-HoldTagName] <string>] [-SkipSshKeys] [<CommonParameters>]
+Get-RotationCandidate [-VaultName] <string> [[-VM] <Object[]>] [[-ThresholdDays] <int>] [[-EnableTagName] <string>] [[-EnableTagValue] <string>] [[-HoldTagName] <string>] [-IgnoreHold] [-SkipSshKeys] [<CommonParameters>]
 ```
 
 ## Parameters
@@ -32,6 +31,8 @@ Get-RotationCandidate [-VaultName] <string> [[-ThresholdDays] <int>] [[-EnableTa
 | Name | Type | Required | Pipeline | Default | Description |
 |---|---|---|---|---|---|
 | `-VaultName` | String | yes | no |  |  |
+| `-VM` | Object[] | no | no |  | Rotate these VMs instead of discovering tagged ones. Naming a machine is a stronger statement of intent than a tag, so the enable tag is not required and the expiry threshold does not apply - the reason becomes Manual. The hold tag still applies, because it means somebody is working on that machine. |
+| `-IgnoreHold` | SwitchParameter | no | no |  | Rotate even a VM carrying the hold tag. Only meaningful with -VM: a scheduled run must never talk itself out of a hold. The last point is the design in one sentence: the expiry date is the only signal. Everything else writes to it. |
 | `-ThresholdDays` | Int32 | no | no | 14 |  |
 | `-EnableTagName` | String | no | no | CredentialRotation |  |
 | `-EnableTagValue` | String | no | no | enabled |  |

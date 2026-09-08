@@ -1,9 +1,8 @@
-# CredentialRotation module loader.
+# AzureVMCredentialRotation module loader.
 #
-# Functions live in Public/ and Private/ as one file each. The build script in
-# build/Build-Runbook.ps1 flattens them into a single runbook file, because
-# Azure Automation runs one script per job and cannot import a module that is
-# not published to a gallery or uploaded as a module asset.
+# Functions live in Public/ and Private/ as one file each. Azure Automation runs one
+# script per job, so the runbook either imports this module from the Gallery (the Bicep
+# path) or runs the flattened build from build/Build-Runbook.ps1 (the Terraform path).
 
 $public = @(Get-ChildItem -Path (Join-Path $PSScriptRoot 'Public') -Filter '*.ps1' -ErrorAction SilentlyContinue)
 $private = @(Get-ChildItem -Path (Join-Path $PSScriptRoot 'Private') -Filter '*.ps1' -ErrorAction SilentlyContinue)
