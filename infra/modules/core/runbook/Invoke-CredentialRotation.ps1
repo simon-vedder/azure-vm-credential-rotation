@@ -1761,7 +1761,10 @@ function Write-RotationRecord {
 
     process {
         try {
+            # Az.Accounts 5 returns the token as a SecureString; the sandbox's older module returns
+            # a string. Accept both, so the same wrapper works in Automation and at a prompt.
             $token = (Get-AzAccessToken -ResourceUrl 'https://monitor.azure.com' -ErrorAction Stop).Token
+            if ($token -is [securestring]) { $token = ConvertFrom-SecureString -SecureString $token -AsPlainText }
             $uri = '{0}/dataCollectionRules/{1}/streams/{2}?api-version=2023-01-01' -f
                 $DataCollectionEndpoint.TrimEnd('/'), $DataCollectionRuleId, $StreamName
             $body = ConvertTo-Json -InputObject @($Record) -Depth 5 -Compress

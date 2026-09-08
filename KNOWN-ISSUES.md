@@ -5,16 +5,18 @@ official documentation, *(to verify)* on the lab list. Nothing here is guessed.
 
 ## Behaviour
 
-- *(Microsoft, with a caveat)* The staging secret `<name>-pending` is written with a one-day
-  expiry, so a machine that stays off for longer than that has an **expired** staging secret
-  waiting when the next run tries to resume. [About Azure Key Vault secrets](https://learn.microsoft.com/en-us/azure/key-vault/secrets/about-secrets)
-  says `get` works on an expired secret and names recovery as the reason; that is what the
-  resume relies on. The same page also says operations outside the `nbf`/`exp` window are
-  disallowed "except in particular situations", and [Azure/AzureKeyVault#19](https://github.com/Azure/AzureKeyVault/issues/19)
+- *(observed)* The staging secret `<name>-pending` is written with a one-day expiry, so a
+  machine that stays off for longer than that has an **expired** staging secret waiting when
+  the next run tries to resume. Verified against a real vault on 2026-09-08: a staging secret
+  whose expiry lay two days in the past was read, applied to the guest and promoted
+  (`tests/manual/Invoke-LabSmokeTest.ps1`, step `resume-expired-pending`). That matches
+  [About Azure Key Vault secrets](https://learn.microsoft.com/en-us/azure/key-vault/secrets/about-secrets),
+  which says `get` works on an expired secret and names recovery as the reason. The same page
+  also says operations outside the `nbf`/`exp` window are disallowed "except in particular
+  situations", and [Azure/AzureKeyVault#19](https://github.com/Azure/AzureKeyVault/issues/19)
   reports the error `Operation get is not allowed on an expired secret` in the wild.
   `Get-RotationSecret` treats that message as an error rather than as "absent", so if it ever
-  appears the run stops loudly instead of rotating over a staged value. *(to verify)* a resume
-  after more than 24 hours against a real vault.
+  appears the run stops loudly instead of rotating over a staged value.
 - *(observed)* The `State` tag on the staging secret is the resume flag. Remove it by hand and
   the next run does not resume; it rotates fresh. The machine and the vault end up in step
   again, one rotation later, and the staged value is left behind as an orphan. No lockout — see

@@ -41,14 +41,6 @@ az vm update --ids <id> --set tags.CredentialRotationHold=true     # temporary
 az vm update --ids <id> --remove tags.CredentialRotation           # permanent
 ```
 
-Hold also works per secret, for a single credential on a machine that otherwise
-rotates:
-
-```bash
-az keyvault secret set-attributes --vault-name kv-creds \
-  --name "vm01-azureadmin-pw" --tags CredentialRotationHold=true
-```
-
 **During an incident.** If someone needs sustained access to a local account, set the
 hold tag *before* they read the credential. Otherwise the read pulls the expiry date
 forward and the credential is replaced under them mid-incident.
