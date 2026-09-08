@@ -1,5 +1,5 @@
 // Subscription-scope deployment of credential rotation: resource group, Automation Account with a
-// system-assigned identity, the CredentialRotation module from the Gallery, the runbook and its
+// system-assigned identity, the AzureVMCredentialRotation module from the Gallery, the runbook and its
 // schedule, the roles the identity needs, and optionally the audit trail and rotation after use.
 //
 //   az deployment sub create -l switzerlandnorth -f deploy/main.bicep \
@@ -19,7 +19,7 @@ param location string = 'switzerlandnorth'
 param resourceGroupName string = 'rg-credential-rotation'
 param automationAccountName string = 'aa-credential-rotation'
 
-@description('CredentialRotation module version on the PowerShell Gallery.')
+@description('AzureVMCredentialRotation module version on the PowerShell Gallery.')
 param moduleVersion string
 
 @description('Version stamp written to the module and runbook content links, System.Version form (up to four numeric parts). Defaults to moduleVersion with any pre-release suffix stripped, because Automation rejects one; bump it to force Automation to re-import unchanged URIs.')
@@ -136,7 +136,7 @@ param tags object = {
 param baseTime string = utcNow()
 
 var effectiveModuleUri = empty(modulePackageUri)
-  ? 'https://www.powershellgallery.com/api/v2/package/CredentialRotation/${moduleVersion}'
+  ? 'https://www.powershellgallery.com/api/v2/package/AzureVMCredentialRotation/${moduleVersion}'
   : modulePackageUri
 
 // Automation rejects a content-link version that is not a System.Version, so a pre-release suffix

@@ -11,7 +11,7 @@ project was written, and it made the logic effectively untestable.
 
 ## Decision
 
-The source is a proper module, one function per file, under `src/CredentialRotation`.
+The source is a proper module, one function per file, under `src/AzureVMCredentialRotation`.
 `build/Build-Runbook.ps1` concatenates it with the runbook wrapper into a single file
 in `infra/modules/core/runbook/`, which is **committed** so deployment needs no build step. CI fails if the
 artefact and the sources drift apart.
@@ -22,7 +22,7 @@ artefact and the sources drift apart.
 generation, SSH key encoding and secret-name resolution are pure and get real
 assertions rather than a hopeful manual run.
 
-**Runnable locally.** `Import-Module ./src/CredentialRotation` then
+**Runnable locally.** `Import-Module ./src/AzureVMCredentialRotation` then
 `Invoke-CredentialRotation -WhatIf` against one VM. Nobody deploys a scheduled job that
 changes administrator passwords without trying it by hand first, and making that
 possible is the difference between a tool people adopt and one they read.

@@ -1,5 +1,5 @@
 @{
-    RootModule        = 'CredentialRotation.psm1'
+    RootModule        = 'AzureVMCredentialRotation.psm1'
     ModuleVersion     = '0.1.0'
     GUID              = 'b3f1c2d4-5e6a-4b7c-8d9e-0a1b2c3d4e5f'
     Author            = 'Simon Vedder'

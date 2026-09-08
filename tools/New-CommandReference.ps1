@@ -220,7 +220,7 @@ foreach ($command in $documented) {
             'What Azure Automation runs on the schedule. It authenticates, reads its settings from the automation variables, and calls the module.'
         }
         else {
-            'The commands the runbook calls, and the same ones you can run locally after Install-Module CredentialRotation.'
+            'The commands the runbook calls, and the same ones you can run locally after Install-Module AzureVMCredentialRotation.'
         }
         Body      = ($body -join "`n").TrimEnd() + "`n"
     }

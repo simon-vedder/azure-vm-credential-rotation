@@ -28,7 +28,7 @@ jobs:
         id: manifest
         shell: pwsh
         run: |
-          $manifest = Test-ModuleManifest ./src/CredentialRotation/CredentialRotation.psd1
+          $manifest = Test-ModuleManifest ./src/AzureVMCredentialRotation/AzureVMCredentialRotation.psd1
           $tag = '${{ github.ref_name }}'.TrimStart('v')
           if ($tag -ne $manifest.Version.ToString()) { throw "Tag $tag does not match ModuleVersion $($manifest.Version)." }
           $prerelease = [string]$manifest.PrivateData.PSData.Prerelease
@@ -51,7 +51,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path ./dist | Out-Null
-          Compress-Archive -Path ./src/CredentialRotation/* -DestinationPath ./dist/CredentialRotation.zip
+          Compress-Archive -Path ./src/AzureVMCredentialRotation/* -DestinationPath ./dist/AzureVMCredentialRotation.zip
           Copy-Item ./src/runbooks/Invoke-CredentialRotationRunbook.ps1 ./dist/
 
       - name: Publish to the PowerShell Gallery
@@ -60,14 +60,14 @@ jobs:
           PSGALLERY_API_KEY: ${{ secrets.PSGALLERY_API_KEY }}
         run: |
           if (-not $env:PSGALLERY_API_KEY) { throw 'Secret PSGALLERY_API_KEY is not set.' }
-          Publish-Module -Path ./src/CredentialRotation -NuGetApiKey $env:PSGALLERY_API_KEY -Repository PSGallery -ErrorAction Stop
+          Publish-Module -Path ./src/AzureVMCredentialRotation -NuGetApiKey $env:PSGALLERY_API_KEY -Repository PSGallery -ErrorAction Stop
 
       - name: GitHub release with the module zip and the runbook
         uses: softprops/action-gh-release@v2
         with:
-          name: CredentialRotation ${{ steps.manifest.outputs.full_version }}
+          name: AzureVMCredentialRotation ${{ steps.manifest.outputs.full_version }}
           prerelease: ${{ steps.manifest.outputs.prerelease == 'true' }}
           files: |
-            dist/CredentialRotation.zip
+            dist/AzureVMCredentialRotation.zip
             dist/Invoke-CredentialRotationRunbook.ps1
           generate_release_notes: true

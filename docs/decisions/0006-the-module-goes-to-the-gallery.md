@@ -25,11 +25,18 @@ artefact stops being free:
 
 ## Decision
 
-`CredentialRotation` is published to the PowerShell Gallery. The Bicep deployment imports it into
+`AzureVMCredentialRotation` is published to the PowerShell Gallery. The Bicep deployment imports it into
 the Automation Account by version, and publishes the thin runbook wrapper from a pinned raw URL.
 
 The wrapper imports the module only when its commands are not already defined, so the flattened
 artefact keeps working unchanged.
+
+The published name is `AzureVMCredentialRotation`, not the shorter `CredentialRotation` the source
+folder used to carry. Both were free; the short one is a poor name on a public feed, where a reader
+typing `Install-Module CredentialRotation` has no idea whether they are getting something for Azure
+VMs, for a database, or for a CI system. It also matches how the sibling tool is named
+(`azure-vm-inplace-upgrade` publishes `AzureInPlaceUpgrade`). A Gallery name cannot be changed after
+the first publish, only abandoned, so it was worth the rename beforehand.
 
 ## Why not just keep flattening
 

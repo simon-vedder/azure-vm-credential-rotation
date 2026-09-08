@@ -10,7 +10,7 @@
 #>
 
 BeforeAll {
-    $script:ModuleRoot = Join-Path $PSScriptRoot '..' 'src' 'CredentialRotation'
+    $script:ModuleRoot = Join-Path $PSScriptRoot '..' 'src' 'AzureVMCredentialRotation'
 
     # Az is not installed in CI, so stub the cmdlets that get mocked. Pester cannot
     # mock a command that does not exist.
