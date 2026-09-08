@@ -58,6 +58,19 @@ the renamed account still owned the uid and the home directory, and the rotation
 recorded as `Failed` with the value still staged. Details in
 [KNOWN-ISSUES](../KNOWN-ISSUES.md#the-account-was-renamed-inside-the-guest).
 
+### VMAccess restores passwordless sudo on Linux
+
+The extension writes `/etc/sudoers.d/waagent` with `<user> ALL = (ALL) NOPASSWD: ALL` for the
+account named in the OS profile. Where cloud-init already granted that, nothing changes. Where
+somebody took it away on purpose, **every rotation puts it back**.
+
+*Measured, 2026-09-08*: both sudoers files were removed, one rotation was run, and `waagent`
+came back with `NOPASSWD: ALL`. See
+[KNOWN-ISSUES](../KNOWN-ISSUES.md#what-a-rotation-changes-besides-the-credential).
+
+*Mitigation:* keep such machines out of scope, or let configuration management reassert the
+sudoers policy after a rotation. There is no switch on the extension for this.
+
 ### The identity needs extension-install rights
 
 Virtual Machine Contributor cannot be narrowed further for this purpose — setting a

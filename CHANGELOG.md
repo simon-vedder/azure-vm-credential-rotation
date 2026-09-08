@@ -1,6 +1,33 @@
 # Changelog
 
-## [0.4.0] — unreleased
+## [0.4.1] — 2026-09-08
+
+### Fixed
+
+- `{rg}` is lower-cased before it goes into a secret name. A subscription-wide `Get-AzVM`
+  returns the resource group upper-cased while a targeted one returns it as typed, so the
+  runbook and a prompt produced differently-cased names for the same machine. Key Vault looks
+  names up case-insensitively, so no second secret was ever created - verified against a real
+  vault - but the name should not change shape depending on who wrote it.
+
+## [Unreleased]
+
+### Added
+
+- `tests/manual/Test-HardeningDrift.ps1`, which answers a question the smoke tests do not:
+  a rotation working on a hardened image is one thing, leaving it hardened is another. It
+  photographs what a baseline measures, rotates, and diffs.
+
+### Documented
+
+- **VMAccess restores passwordless sudo on Linux.** It writes `/etc/sudoers.d/waagent` with
+  `NOPASSWD: ALL` for the OS-profile account on every rotation. Stock images already grant
+  that; a machine where it was removed on purpose gets it back. Verified by removing both
+  sudoers files, rotating, and finding it recreated. In KNOWN-ISSUES, the threat model and
+  the README, because it is the same class of surprise as the extension recreating a deleted
+  account.
+
+## [0.4.0] — 2026-09-08
 
 ### Added
 

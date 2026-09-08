@@ -213,6 +213,10 @@ Worth knowing before you run it, not after:
   on Windows a renamed account leads to a second administrator and a rotation that
   reports success; on Linux the rotation fails and touches nothing. See
   [KNOWN-ISSUES](KNOWN-ISSUES.md#the-account-was-renamed-inside-the-guest).
+- **On Linux the extension restores passwordless sudo.** It writes `/etc/sudoers.d/waagent`
+  with `NOPASSWD: ALL` for the OS-profile account, on every rotation. Stock images already
+  grant that; hardened ones where it was removed get it back. Measured, see
+  [KNOWN-ISSUES](KNOWN-ISSUES.md#what-a-rotation-changes-besides-the-credential).
 - **`remove_prior_keys` and `reset_ssh` default to off**, unlike most examples you
   will find. The first wipes every entry in `authorized_keys` — colleagues,
   configuration management, backup agents. The second can restore `sshd_config` to

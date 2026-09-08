@@ -227,6 +227,14 @@ Describe 'Resolve-SecretName' {
         $test | Should -Be 'rg-test-web-01-pw'
     }
 
+    It 'gives {rg} a stable casing' {
+        # A subscription-wide Get-AzVM returns the group upper-cased, a targeted one as typed.
+        $upper = Resolve-SecretName -VMName 'web-01' -AdminUsername 'a' -Kind 'pw' -ResourceGroupName 'RG-PROD' -Template '{rg}-{vm}-{kind}'
+        $lower = Resolve-SecretName -VMName 'web-01' -AdminUsername 'a' -Kind 'pw' -ResourceGroupName 'rg-prod' -Template '{rg}-{vm}-{kind}'
+        $upper | Should -Be $lower
+        $upper | Should -Be 'rg-prod-web-01-pw'
+    }
+
     It 'refuses a template that uses {rg} without a resource group' {
         # Dropping it silently would produce a deliberate-looking name that collides anyway.
         { Resolve-SecretName -VMName 'web-01' -AdminUsername 'azureadmin' -Kind 'pw' -Template '{rg}-{vm}-{kind}' } |
