@@ -66,7 +66,9 @@ drift apart. [ADR 0007](docs/decisions/0007-bicep-beside-terraform.md) says why 
 
 ### Bicep
 
-One command, everything in it, dry-run by default:
+[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fsimon-vedder%2Fazure-vm-credential-rotation%2Fmain%2Fdeploy%2Fazuredeploy.json)
+
+Or one command, everything in it, dry-run by default:
 
 ```bash
 az deployment sub create \
