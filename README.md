@@ -1,5 +1,7 @@
 # azure-vm-credential-rotation
 
+![Credential rotation driven by the Key Vault expiry date: near expiry rotates, a read pulls the date in, everything else is left alone](docs/images/hero.png)
+
 Credential lifecycle for Azure VMs that **cannot use Windows LAPS or Entra login**.
 
 Rotates local administrator passwords and SSH keys on a schedule, and — optionally —
