@@ -25,7 +25,7 @@ The button opens the portal with the compiled template and asks for the paramete
 az deployment sub create \
   --location switzerlandnorth \
   --template-file deploy/main.bicep \
-  --parameters moduleVersion=0.2.0 \
+  --parameters moduleVersion=0.3.0 \
                keyVaultName=kv-credentials \
                keyVaultResourceGroupName=rg-vault \
                targetResourceGroupNames='["rg-workloads"]'
@@ -73,7 +73,7 @@ nothing reports it.
 az deployment sub what-if \
   --location switzerlandnorth \
   --template-file deploy/main.bicep \
-  --parameters moduleVersion=0.2.0 keyVaultName=kv-credentials keyVaultResourceGroupName=rg-vault
+  --parameters moduleVersion=0.3.0 keyVaultName=kv-credentials keyVaultResourceGroupName=rg-vault
 ```
 
 Role assignments come back as `Unsupported` there. That is expected: their names are derived from

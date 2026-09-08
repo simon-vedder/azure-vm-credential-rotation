@@ -77,10 +77,17 @@ Invoke-CredentialRotation -VaultName kv-creds -VMName jump-01 -WhatIf
 Invoke-CredentialRotation -VaultName kv-creds -VMName jump-01
 ```
 
-Naming a machine is a stronger statement of intent than a tag, so `-VMName` needs no
-enable tag and ignores the expiry threshold: you asked for this machine, it gets rotated.
-The **hold tag still applies** — it means somebody is working on that machine — and
-`-IgnoreHold` overrides it if you mean to.
+`-VMName` ignores the expiry threshold: you asked for this machine, it gets rotated. Tags
+do not come into it at all — the module never reads one. If you want a set of machines
+instead, select them however you like and hand them over:
+
+```powershell
+$vms = Get-AzVM | Where-Object { $_.Tags.CredentialRotation -eq 'enabled' }
+Invoke-CredentialRotation -VaultName kv-creds -VM $vms
+```
+
+That is exactly what the runbook does, and the tag in that line is your policy rather than
+the module's.
 
 Your own account needs Key Vault Secrets Officer on the vault and Virtual Machine
 Contributor on the VM. That is the difference from the scheduled form, where a managed
@@ -88,7 +95,8 @@ identity holds those instead of you.
 
 What you do not get this way is the *loop*: the retry for a machine that was powered off,
 and rotation within hours of somebody reading a credential. Both need something running on
-a schedule.
+a schedule. Rotation after use is `Register-CredentialAccess`, which pulls the expiry dates
+of credentials somebody read forward — the rotation then sees ordinary ageing.
 
 ---
 
@@ -108,7 +116,7 @@ Or one command, everything in it, dry-run by default:
 az deployment sub create \
   --location switzerlandnorth \
   --template-file deploy/main.bicep \
-  --parameters moduleVersion=0.2.0 \
+  --parameters moduleVersion=0.3.0 \
                keyVaultName=kv-credentials \
                keyVaultResourceGroupName=rg-vault \
                targetResourceGroupNames='["rg-workloads"]'
@@ -153,10 +161,14 @@ way — see [ADR 0006](docs/decisions/0006-the-module-goes-to-the-gallery.md).
 
 ### Opting a machine in
 
-Nothing is rotated until you say so. Discovery is opt-in by tag, because a tool that
-treats "no secret exists for this VM" as "rotate it" will, on its first run in an
-established tenant, change the local administrator password of every machine it can
-see.
+Nothing is rotated until you say so. The orchestrator's discovery is opt-in by tag,
+because a loop that treats "no secret exists for this VM" as "rotate it" will, on its
+first run in an established tenant, change the local administrator password of every
+machine it can see.
+
+The tag is the *orchestrator's* vocabulary, not the module's — the module rotates the
+machines it is handed and has no opinion about how they were chosen. That is why the
+same code serves one machine at a prompt and a fleet on a schedule.
 
 ```bash
 az vm update --ids <vm-id> --set tags.CredentialRotation=enabled

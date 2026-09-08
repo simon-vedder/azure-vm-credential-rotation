@@ -21,7 +21,7 @@ consumers nor pollutes the audit trail this function depends on.
 ## Syntax
 
 ```powershell
-Register-CredentialAccess [-VaultName] <string> [-WorkspaceId] <string> [[-GracePeriodHours] <int>] [[-LookbackHours] <int>] [[-ExcludeObjectId] <string[]>] [[-HoldTagName] <string>] [-WhatIf] [-Confirm] [<CommonParameters>]
+Register-CredentialAccess [-VaultName] <string> [-WorkspaceId] <string> [[-GracePeriodHours] <int>] [[-LookbackHours] <int>] [[-ExcludeObjectId] <string[]>] [-WhatIf] [-Confirm] [<CommonParameters>]
 ```
 
 ## Parameters
@@ -33,7 +33,6 @@ Register-CredentialAccess [-VaultName] <string> [-WorkspaceId] <string> [[-Grace
 | `-GracePeriodHours` | Int32 | no | no | 8 | How long the reader keeps working credentials. Eight hours covers a working day. Note that a password change does not end an established RDP session, but it does break reconnects, UAC elevation and anything that re-authenticates. |
 | `-LookbackHours` | Int32 | no | no | 24 |  |
 | `-ExcludeObjectId` | String[] | no | no | @() |  |
-| `-HoldTagName` | String | no | no | CredentialRotationHold |  |
 
 Supports `-WhatIf` and `-Confirm`.
 

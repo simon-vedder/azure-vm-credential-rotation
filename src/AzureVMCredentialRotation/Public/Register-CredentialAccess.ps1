@@ -36,8 +36,7 @@ function Register-CredentialAccess {
 
         [ValidateRange(0, 168)][int]$GracePeriodHours = 8,
         [ValidateRange(1, 720)][int]$LookbackHours = 24,
-        [string[]]$ExcludeObjectId = @(),
-        [string]$HoldTagName = 'CredentialRotationHold'
+        [string[]]$ExcludeObjectId = @()
     )
 
     $accessed = Get-AccessedSecret -WorkspaceId $WorkspaceId -VaultName $VaultName `
@@ -59,11 +58,6 @@ function Register-CredentialAccess {
 
         $meta = Get-RotationSecret -VaultName $VaultName -Name $entry.SecretName
         if (-not $meta.Exists) { continue }
-
-        if ($meta.Secret.Tags -and $meta.Secret.Tags[$HoldTagName] -eq 'true') {
-            Write-RotationLog -Message "'$($entry.SecretName)' was read by $($entry.AccessedBy) but is on hold, leaving expiry untouched" -Level Warning -Scope 'access'
-            continue
-        }
 
         $currentExpiry = if ($meta.Secret.Expires) { $meta.Secret.Expires.ToUniversalTime() } else { $null }
 

@@ -2,9 +2,19 @@
 
 > Azure Automation entry point for VM credential rotation.
 
-Thin wrapper. It authenticates, resolves configuration, guards against
-overlapping runs and calls Invoke-CredentialRotation. All logic lives in the
-CredentialRotation module under src/.
+The orchestrator. It authenticates, resolves its configuration, guards against
+overlapping runs, decides which machines are in scope, and hands them to the
+AzureVMCredentialRotation module.
+
+That split is the point. The module rotates the machines it is given and has no
+opinion about tags; every policy decision - which machines are enabled, which are
+on hold, which subscriptions to walk, how often to look for reads - lives here.
+So the same module runs from a workstation against one named machine and from this
+runbook against a fleet, without a mode switch.
+
+Scope is opt-in by tag. A discovery loop that treated "no secret exists for this
+VM" as "rotate it" would, on its first run in an established tenant, change the
+local administrator password of every machine it can see.
 
 It reaches Azure Automation two ways. The Bicep deployment imports the module from
 the PowerShell Gallery and publishes this file as it stands; the Terraform
@@ -21,7 +31,7 @@ expiry-driven rotation.
 ## Syntax
 
 ```powershell
-./Invoke-CredentialRotationRunbook.ps1 [[-VaultName] <string>] [[-SubscriptionId] <string>] [[-ThresholdDays] <int>] [[-ValidityDays] <int>] [[-EnableTagName] <string>] [[-EnableTagValue] <string>] [[-SkipSshKeys] <bool>] [[-RemovePriorSshKeys] <bool>] [[-ResetSshConfiguration] <bool>] [[-DryRun] <bool>] [<CommonParameters>]
+./Invoke-CredentialRotationRunbook.ps1 [[-VaultName] <string>] [[-SubscriptionId] <string>] [[-ThresholdDays] <int>] [[-ValidityDays] <int>] [[-EnableTagName] <string>] [[-EnableTagValue] <string>] [[-HoldTagName] <string>] [[-SkipSshKeys] <bool>] [[-RemovePriorSshKeys] <bool>] [[-ResetSshConfiguration] <bool>] [[-DryRun] <bool>] [<CommonParameters>]
 ```
 
 ## Requirements and notes
@@ -42,6 +52,7 @@ Requires the automation account's managed identity to hold:
 | `-ValidityDays` | Int32 | no | no | 0 |  |
 | `-EnableTagName` | String | no | no |  |  |
 | `-EnableTagValue` | String | no | no |  |  |
+| `-HoldTagName` | String | no | no | CredentialRotationHold | VM tag that takes a machine out of scope for this run without untagging it. Checked here rather than in the module, because it is a policy statement about a machine rather than a fact about the credential. |
 | `-SkipSshKeys` | Boolean | no | no |  |  |
 | `-RemovePriorSshKeys` | Boolean | no | no |  |  |
 | `-ResetSshConfiguration` | Boolean | no | no |  |  |

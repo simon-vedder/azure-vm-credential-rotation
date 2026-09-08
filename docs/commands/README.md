@@ -6,7 +6,7 @@ Credential lifecycle for Azure VMs that cannot use Windows LAPS or Entra login. 
 
 | | |
 |---|---|
-| Module version | 0.2.0 |
+| Module version | 0.3.0 |
 | PowerShell | 7.2+ (Core) |
 | Required modules | `Az.Accounts`, `Az.Compute`, `Az.KeyVault`, `Az.OperationalInsights`, `Az.Resources` |
 | Getting it | `Install-Module AzureVMCredentialRotation`, or let the deployment pull it at the pinned version |
@@ -27,8 +27,8 @@ The commands the runbook calls, and the same ones you can run locally after Inst
 
 | Command | What it does |
 |---|---|
-| [Get-RotationCandidate](Get-RotationCandidate.md) | Finds the credentials that need rotating. |
-| [Invoke-CredentialRotation](Invoke-CredentialRotation.md) | Reconciles VM credentials against their Key Vault expiry dates. |
+| [Get-RotationCandidate](Get-RotationCandidate.md) | Works out which credentials on the given machines need rotating. |
+| [Invoke-CredentialRotation](Invoke-CredentialRotation.md) | Rotates the credentials that are due on the machines you give it. |
 | [Register-CredentialAccess](Register-CredentialAccess.md) | Brings the expiry date forward for secrets a human has read. |
 | [Update-VMCredential](Update-VMCredential.md) | Rotates one credential on one VM and stores it in Key Vault. |
 

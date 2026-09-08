@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.3.0] — 2026-09-08
+
+**Breaking.** The module no longer selects machines. It rotates the machines it is given
+and has no opinion about tags; every policy decision moved to the orchestrator that calls
+it. That is what lets the same code run from a workstation against one named machine and
+from a runbook against a fleet, without a mode switch — the same split the sibling tool
+uses, where the module never reads a tag and the runbook owns discovery.
+
+### Breaking
+
+- `Invoke-CredentialRotation` no longer discovers machines. It takes `-VMName` (rotate that
+  one, now) or `-VM` (machines the caller selected, expiry threshold applies). The
+  subscription loop, `-EnableTagName`, `-EnableTagValue` and `-HoldTagName` are gone.
+- `Invoke-CredentialRotation` no longer runs the access scan. Call
+  `Register-CredentialAccess` first if you want rotation after use; it pulls the expiry
+  dates forward and the rotation then sees ordinary ageing. One signal, one code path,
+  and the orchestrator decides how often to look.
+- `Get-RotationCandidate` requires `-VM` and lost the tag parameters. New `-IgnoreExpiry`
+  replaces the implicit behaviour of naming a machine, so the intent is stated rather than
+  inferred from which parameter was bound.
+- `Register-CredentialAccess` lost `-HoldTagName`. A hold is a statement about a machine,
+  not a fact about a credential.
+
+### Added
+
+- The runbook wrapper is now the orchestrator: tag discovery, hold filtering, the
+  subscription walk and the access scan all live there. It also refetches each selected
+  machine in full, because the list form of `Get-AzVM` has no `OSProfile`.
+- Two tests that assert the layering itself, through the PowerShell parser rather than a
+  regex: the module never calls `Get-AzVM` without `-Name` or `-ResourceGroupName`, and no
+  module file uses a tag variable. A third checks the runbook does both, so the behaviour
+  cannot pass by simply disappearing.
+
+### Unchanged
+
+- The 15 `CR_*` automation variables, so Bicep, Terraform and the deployment contract test
+  are untouched. `HoldTagName` became an ordinary wrapper parameter rather than a
+  sixteenth variable, precisely to keep that contract still.
+
 ## [0.2.0] — 2026-09-08
 
 ### Added
