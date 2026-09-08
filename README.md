@@ -281,11 +281,13 @@ on the PowerShell Gallery, and **verified end to end against a live Azure tenant
 2026-09-08 — both ways in. The module was run from a workstation, and the runbook was deployed
 from `deploy/main.bicep` with the module imported from the Gallery. Every rotation below was
 checked on the guest, not only in the vault: Windows passwords with a local logon check, Linux
-passwords against the shadow hash, SSH keys by logging in. The lab and both test scripts are in
-the repository (`deploy/lab.bicep`, `tests/manual/`).
+passwords against the shadow hash, SSH keys by logging in. The lab and the test scripts are in
+the repository (`deploy/lab.bicep`, `tests/manual/`); what they found that was not obvious is in
+[KNOWN-ISSUES](KNOWN-ISSUES.md).
 
-From a workstation, on Windows Server 2022 and Ubuntu 24.04 with password authentication on
-(`Invoke-LabSmokeTest.ps1`, fourteen steps):
+From a workstation (`Invoke-LabSmokeTest.ps1`, fourteen steps), on Windows Server 2022 and
+Ubuntu 24.04 with password authentication on, and again on the **CIS Level 1 marketplace
+images** of both:
 
 - password rotation on Windows; password and SSH key rotation together on Linux, both
   promoted into Key Vault with a 90-day expiry
@@ -298,23 +300,29 @@ From a workstation, on Windows Server 2022 and Ubuntu 24.04 with password authen
   had expired two days earlier
 - a deallocated machine is skipped with nothing staged; an unknown name fails before anything
   is touched
+- an account renamed inside the guest: Windows ends up with a second administrator and a
+  rotation that reports success, Linux fails and touches nothing (measured with
+  `Invoke-RenamedAccountProbe.ps1`, described in KNOWN-ISSUES)
 
-Through the deployed runbook (`Invoke-OrchestratorSmokeTest.ps1`):
+Through the deployed runbook (`Invoke-OrchestratorSmokeTest.ps1`), with the automation
+account in one subscription and machines in two:
 
 - the Bicep deployment at subscription scope: automation account, module 0.3.0 from the
-  Gallery, runbook, schedule, the 15 variables, five role assignments, workspace, custom
-  table, ingestion endpoint and rule, diagnostic settings, workbook
-- a dry run reports the two tagged machines and what it would rotate, and changes nothing
-- a live run rotates only the credential that is due and leaves the other machine alone
+  Gallery, runbook, schedule, the 17 variables, role assignments in both subscriptions,
+  workspace, custom table, ingestion endpoint and rule, diagnostic settings, workbook - and
+  a redeployment with `dryRun=false` that actually takes effect
+- a dry run reports the tagged machines in every subscription and what it would rotate, and
+  changes nothing
+- a live run rotates what is due and nothing else
 - the hold tag takes a machine out of scope while its credential is due
 - rotation records reach `CredentialRotation_CL` through the Logs Ingestion API
 - a human read of a secret is found in `AZKVAuditLogs`, the expiry pulled forward, and the
   credential replaced in the same run
+- the machine in the second subscription is found, rotated, and accepts the password
 - two jobs started together: one yields, one runs
 
 Still unverified, and worth knowing before you rely on them:
 
-- **Hardened images.** VMAccess behaviour against a CIS-baselined host is untested.
 - **Scale.** Tested with a handful of VMs. The limit is not ARM throttling - a run makes five
   to seven calls per tagged machine, far below the token-bucket limits - but throughput:
   rotations run one after another, each VMAccess round trip took 30 to 60 seconds in the lab,
@@ -323,10 +331,11 @@ Still unverified, and worth knowing before you rely on them:
   one wave that exceeds it is the first onboarding of a large fleet, when every credential is
   missing at once. Tag in batches and let the schedule catch up - whatever a job does not
   reach is picked up by the next one.
-- **Multi-subscription.** Single subscription only so far.
-- **Terraform.** The Bicep path is the one exercised live with 0.3.0. The Terraform modules
-  deploy the same runbook from the committed build artefact and are validated in CI; their
-  last live deployment was with 0.1.0.
+- **CIS Level 2 and other hardening.** Level 1 passed on both platforms; Level 2 and custom
+  baselines were not run.
+- **Terraform.** The Bicep path is the one exercised live. The Terraform modules deploy the
+  same runbook from the committed build artefact and are validated in CI; their last live
+  deployment was with 0.1.0.
 
 Start in dry-run mode on machines you can afford to lock yourself out of.
 
