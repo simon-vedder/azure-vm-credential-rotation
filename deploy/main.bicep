@@ -3,7 +3,7 @@
 // schedule, the roles the identity needs, and optionally the audit trail and rotation after use.
 //
 //   az deployment sub create -l switzerlandnorth -f deploy/main.bicep \
-//     -p moduleVersion=0.2.0 keyVaultName=kv-creds keyVaultResourceGroupName=rg-vault \
+//     -p moduleVersion=0.3.0 keyVaultName=kv-creds keyVaultResourceGroupName=rg-vault \
 //        targetResourceGroupNames='["rg-workloads"]'
 //
 // Subscription scope because the Key Vault and the VMs usually live in different resource groups

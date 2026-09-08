@@ -389,7 +389,7 @@ Describe 'Resolve-TargetVM' {
     }
 }
 
-Describe 'Get-RotationCandidate with an explicitly named VM' {
+Describe 'Get-RotationCandidate takes the machines it is given' {
 
     BeforeAll {
         function Get-AzVM { param($Name, $ResourceGroupName, $ErrorAction) }
@@ -423,44 +423,94 @@ Describe 'Get-RotationCandidate with an explicitly named VM' {
         }
     }
 
-    It 'never calls Get-AzVM, because the machine was handed to it' {
-        Mock Get-AzVM { throw 'discovery must not run for a named machine' }
+    It 'never searches for machines' {
+        # Selecting machines is the orchestrator's job. If this ever calls Get-AzVM, the
+        # policy has leaked back into the module.
+        Mock Get-AzVM { throw 'the module must not discover machines' }
         { Get-RotationCandidate -VaultName 'kv' -VM $script:LinuxVM } | Should -Not -Throw
     }
 
-    It 'rotates a machine with no enable tag' {
-        $result = @(Get-RotationCandidate -VaultName 'kv' -VM $script:LinuxVM)
+    It 'does not care whether the machine carries any tag' {
+        $result = @(Get-RotationCandidate -VaultName 'kv' -VM $script:LinuxVM -IgnoreExpiry)
         $result.Count | Should -BeGreaterThan 0
         $result[0].VM.Name | Should -Be 'jump-01'
     }
 
-    It 'reports Manual, not Expiry, for a secret that is nowhere near expiring' {
-        # The whole point of naming a machine: the threshold must not silently do nothing.
-        $result = @(Get-RotationCandidate -VaultName 'kv' -VM $script:LinuxVM)
+    It 'leaves a healthy credential alone by default' {
+        # 300 days from expiry: an orchestrated pass has nothing to do here.
+        @(Get-RotationCandidate -VaultName 'kv' -VM $script:LinuxVM) | Should -BeNullOrEmpty
+    }
+
+    It 'reports Manual, not Expiry, when told to ignore the expiry date' {
+        # What naming a single machine means: the threshold must not silently do nothing.
+        $result = @(Get-RotationCandidate -VaultName 'kv' -VM $script:LinuxVM -IgnoreExpiry)
         $result[0].Reason | Should -Be 'Manual'
-    }
-
-    It 'finds nothing for the same machine through ordinary discovery' {
-        Mock Get-AzVM { @($script:LinuxVM) }
-        # Untagged and 300 days from expiry: neither condition applies.
-        @(Get-RotationCandidate -VaultName 'kv') | Should -BeNullOrEmpty
-    }
-
-    It 'still respects the hold tag' {
-        $held = $script:LinuxVM.PSObject.Copy()
-        $held.Tags = @{ CredentialRotationHold = 'true' }
-        @(Get-RotationCandidate -VaultName 'kv' -VM $held) | Should -BeNullOrEmpty
-    }
-
-    It 'overrides the hold tag only when asked' {
-        $held = $script:LinuxVM.PSObject.Copy()
-        $held.Tags = @{ CredentialRotationHold = 'true' }
-        @(Get-RotationCandidate -VaultName 'kv' -VM $held -IgnoreHold).Count | Should -BeGreaterThan 0
     }
 
     It 'still reports a missing secret as Missing' {
         Mock Get-RotationSecret { [pscustomobject]@{ Exists = $false; Secret = $null } }
         $result = @(Get-RotationCandidate -VaultName 'kv' -VM $script:LinuxVM)
         $result[0].Reason | Should -Be 'Missing'
+    }
+
+    It 'ignores a hold tag, because holding is not its decision' {
+        $held = $script:LinuxVM.PSObject.Copy()
+        $held.Tags = @{ CredentialRotationHold = 'true' }
+        # The orchestrator filters these out before calling. The module rotating it anyway
+        # is correct: it was handed a machine and told to look at it.
+        @(Get-RotationCandidate -VaultName 'kv' -VM $held -IgnoreExpiry).Count | Should -BeGreaterThan 0
+    }
+}
+
+Describe 'The module holds no selection policy' {
+
+    BeforeAll {
+        $script:SourceFiles = Get-ChildItem -Path (Join-Path $PSScriptRoot '..' 'src' 'AzureVMCredentialRotation') -Filter '*.ps1' -Recurse
+        $script:RunbookFile = Join-Path $PSScriptRoot '..' 'src' 'runbooks' 'Invoke-CredentialRotationRunbook.ps1'
+    }
+
+    It 'never lists machines' {
+        # Asked of the parser, not of a regex: the first version of this test failed on the
+        # words "Get-AzVM" inside a help block, which is exactly the kind of false alarm
+        # that gets a guard deleted.
+        #
+        # Get-AzVM with -Name or -ResourceGroupName is resolving something the caller
+        # asked for. A bare Get-AzVM is a search, and searching is the orchestrator's job.
+        $offenders = foreach ($file in $script:SourceFiles) {
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$null)
+            $calls = $ast.FindAll({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.CommandAst] -and
+                    $node.GetCommandName() -eq 'Get-AzVM'
+                }, $true)
+
+            foreach ($call in $calls) {
+                $names = @($call.CommandElements |
+                    Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] } |
+                    ForEach-Object { $_.ParameterName })
+                if (-not ($names -contains 'Name' -or $names -contains 'ResourceGroupName')) { $file.Name }
+            }
+        }
+        $offenders | Should -BeNullOrEmpty -Because "these search for machines instead of being given them: $($offenders -join ', ')"
+    }
+
+    It 'never reads an enable or hold tag' {
+        # Parameter and variable names only. The words may still appear in prose that
+        # explains where the policy went.
+        $offenders = foreach ($file in $script:SourceFiles) {
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$null)
+            $vars = $ast.FindAll({
+                    param($node) $node -is [System.Management.Automation.Language.VariableExpressionAst]
+                }, $true)
+            if ($vars.VariablePath.UserPath -match '^(EnableTagName|EnableTagValue|HoldTagName)$') { $file.Name }
+        }
+        $offenders | Should -BeNullOrEmpty -Because "tags are the orchestrator's vocabulary, but these use them: $($offenders -join ', ')"
+    }
+
+    It 'and the runbook does both, so the behaviour did not simply disappear' {
+        $runbook = Get-Content -Path $script:RunbookFile -Raw
+        $runbook | Should -Match 'Get-AzVM'
+        $runbook | Should -Match 'EnableTagName'
+        $runbook | Should -Match 'HoldTagName'
     }
 }

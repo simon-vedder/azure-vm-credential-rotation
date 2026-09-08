@@ -5,7 +5,7 @@
     Edit the module under src/AzureVMCredentialRotation or the wrapper under src/runbooks,
     then rebuild and commit the result.
 
-    Module version: 0.2.0
+    Module version: 0.3.0
 #>
 
 #Requires -Version 7.2
@@ -14,9 +14,19 @@
     Azure Automation entry point for VM credential rotation.
 
 .DESCRIPTION
-    Thin wrapper. It authenticates, resolves configuration, guards against
-    overlapping runs and calls Invoke-CredentialRotation. All logic lives in the
-    CredentialRotation module under src/.
+    The orchestrator. It authenticates, resolves its configuration, guards against
+    overlapping runs, decides which machines are in scope, and hands them to the
+    AzureVMCredentialRotation module.
+
+    That split is the point. The module rotates the machines it is given and has no
+    opinion about tags; every policy decision - which machines are enabled, which are
+    on hold, which subscriptions to walk, how often to look for reads - lives here.
+    So the same module runs from a workstation against one named machine and from this
+    runbook against a fleet, without a mode switch.
+
+    Scope is opt-in by tag. A discovery loop that treated "no secret exists for this
+    VM" as "rotate it" would, on its first run in an established tenant, change the
+    local administrator password of every machine it can see.
 
     It reaches Azure Automation two ways. The Bicep deployment imports the module from
     the PowerShell Gallery and publishes this file as it stands; the Terraform
@@ -29,6 +39,11 @@
     CR_WorkspaceId and the data collection variables, rotation-after-use sets
     CR_AccessRotationEnabled. Deploy neither and the runbook falls back to plain
     expiry-driven rotation.
+
+.PARAMETER HoldTagName
+    VM tag that takes a machine out of scope for this run without untagging it. Checked
+    here rather than in the module, because it is a policy statement about a machine
+    rather than a fact about the credential.
 
 .PARAMETER DryRun
     Runs the whole pass under -WhatIf. Use this first, always.
@@ -50,6 +65,11 @@ param(
 
     [string]$EnableTagName,
     [string]$EnableTagValue,
+
+    # Not an automation variable on purpose: adding one would change the deployment
+    # contract that Bicep, Terraform and the contract test all agree on, for a name
+    # nobody has ever needed to override.
+    [string]$HoldTagName = 'CredentialRotationHold',
 
     [bool]$SkipSshKeys = $false,
     [bool]$RemovePriorSshKeys = $false,
@@ -781,36 +801,33 @@ function New-RotationRecord {
 function Get-RotationCandidate {
     <#
     .SYNOPSIS
-        Finds the credentials that need rotating.
+        Works out which credentials on the given machines need rotating.
 
     .DESCRIPTION
-        Opt-in, not opt-out. A VM is only considered when it carries the enable tag.
+        The caller states the machines. This function never searches for them, never
+        reads a tag and has no opinion about which machines belong in scope - that is
+        the orchestrator's job, and keeping it there is what lets the same module run
+        from a workstation against one machine and from a runbook against a fleet.
 
-        This is the difference between a tool and an incident. A discovery loop that
-        treats "no secret exists for this VM" as "rotate it" will, on its first run
-        in an established tenant, change the local administrator password of every
-        machine it can see - including the ones whose credentials live in a CMDB or a
-        password manager that nobody told it about.
-
-        Rotation is triggered by one of five conditions:
+        What it does decide is whether a machine the caller already chose actually has
+        something to rotate. Rotation is triggered by one of five conditions:
 
           ResumePending - a previous run was interrupted after staging a value
           Missing       - no secret yet, or a secret with no expiry date
           Expiry        - the expiry date is within the threshold
           Access        - not detected here; access pulls the expiry date forward,
                           and this function then sees it as Expiry
-          Manual        - a VM was named explicitly through -VM, so it is rotated
-                          whatever its expiry date says
+          Manual        - -IgnoreExpiry was set, so a healthy credential is replaced
+                          anyway
 
     .PARAMETER VM
-        Rotate these VMs instead of discovering tagged ones. Naming a machine is a
-        stronger statement of intent than a tag, so the enable tag is not required and
-        the expiry threshold does not apply - the reason becomes Manual. The hold tag
-        still applies, because it means somebody is working on that machine.
+        The machines to examine. Objects from Get-AzVM, fetched by the caller.
 
-    .PARAMETER IgnoreHold
-        Rotate even a VM carrying the hold tag. Only meaningful with -VM: a scheduled
-        run must never talk itself out of a hold.
+    .PARAMETER IgnoreExpiry
+        Treat a healthy, unexpired credential as due anyway, reported as Manual. This is
+        what somebody naming a single machine means: they asked for that machine, and a
+        threshold quietly deciding to do nothing would be the wrong answer. A scheduled
+        pass leaves it off and lets the expiry date decide.
 
         The last point is the design in one sentence: the expiry date is the only
         signal. Everything else writes to it.
@@ -823,16 +840,11 @@ function Get-RotationCandidate {
     param(
         [Parameter(Mandatory)][string]$VaultName,
 
-        # Explicit machines instead of tag discovery. See the note on -VM in the help.
-        [ValidateNotNullOrEmpty()][object[]]$VM,
-
-        [switch]$IgnoreHold,
+        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][object[]]$VM,
 
         [ValidateRange(0, 3650)][int]$ThresholdDays = 14,
 
-        [string]$EnableTagName = 'CredentialRotation',
-        [string]$EnableTagValue = 'enabled',
-        [string]$HoldTagName = 'CredentialRotationHold',
+        [switch]$IgnoreExpiry,
 
         # Linux VMs get an SSH key rotated unless this is set.
         [switch]$SkipSshKeys
@@ -841,37 +853,10 @@ function Get-RotationCandidate {
     $candidates = [System.Collections.Generic.List[object]]::new()
     $now = (Get-Date).ToUniversalTime()
 
-    # Named machines skip discovery entirely. The tag exists to stop a scheduled run
-    # reaching further than intended; it has nothing to protect when a person types the name.
-    $explicit = $PSBoundParameters.ContainsKey('VM')
-
-    $vms = if ($explicit) {
-        @($VM)
-    }
-    else {
-        @(Get-AzVM -ErrorAction Stop | Where-Object {
-            $_.Tags -and
-            $_.Tags.ContainsKey($EnableTagName) -and
-            $_.Tags[$EnableTagName] -eq $EnableTagValue
-        })
-    }
-
-    if ($explicit) {
-        Write-RotationLog -Message "$($vms.Count) VM(s) named explicitly, tag discovery skipped" -Level Info -Scope 'discovery'
-    }
-    else {
-        Write-RotationLog -Message "$($vms.Count) VM(s) tagged $EnableTagName=$EnableTagValue in this subscription" -Level Info -Scope 'discovery'
-    }
+    $vms = @($VM)
+    Write-RotationLog -Message "$($vms.Count) machine(s) handed in by the caller" -Level Info -Scope 'discovery'
 
     foreach ($vm in $vms) {
-        if ($vm.Tags -and $vm.Tags.ContainsKey($HoldTagName) -and $vm.Tags[$HoldTagName] -eq 'true') {
-            if (-not $IgnoreHold) {
-                Write-RotationLog -Message "On hold via $HoldTagName, skipping" -Level Warning -Scope $vm.Name
-                continue
-            }
-            Write-RotationLog -Message "On hold via $HoldTagName, overridden by -IgnoreHold" -Level Warning -Scope $vm.Name
-        }
-
         $adminUsername = $vm.OSProfile.AdminUsername
         if ([string]::IsNullOrWhiteSpace($adminUsername)) {
             Write-RotationLog -Message 'No admin username in the OS profile (specialised image?), skipping' -Level Warning -Scope $vm.Name
@@ -916,17 +901,13 @@ function Get-RotationCandidate {
                 if (-not $secret.Exists) {
                     $reason = 'Missing'
                 }
-                elseif ($secret.Secret.Tags -and $secret.Secret.Tags[$HoldTagName] -eq 'true' -and -not $IgnoreHold) {
-                    Write-RotationLog -Message "Secret '$secretName' is on hold, skipping" -Level Warning -Scope $vm.Name
-                    continue
-                }
                 elseif ($null -eq $secret.Secret.Expires) {
                     $reason = 'Missing'
                     Write-RotationLog -Message "Secret '$secretName' has no expiry date" -Level Warning -Scope $vm.Name
                 }
-                elseif ($explicit) {
-                    # Named on the command line: rotate it, whatever the expiry says. Anything
-                    # else would silently do nothing for a machine somebody asked about.
+                elseif ($IgnoreExpiry) {
+                    # Asked for explicitly: rotate it whatever the expiry says. Anything else
+                    # would silently do nothing for a machine somebody named.
                     $expiresOn = $secret.Secret.Expires.ToUniversalTime()
                     $reason = 'Manual'
                 }
@@ -967,52 +948,38 @@ function Get-RotationCandidate {
 function Invoke-CredentialRotation {
     <#
     .SYNOPSIS
-        Reconciles VM credentials against their Key Vault expiry dates.
+        Rotates the credentials that are due on the machines you give it.
 
     .DESCRIPTION
-        Two ways to call it.
+        The caller states the machines. This function does not search for them, does not
+        read a tag, and has no opinion about which machines belong in scope. That belongs
+        to whatever is orchestrating - a runbook, a pipeline, or you at a prompt - and
+        keeping it out of here is what lets the same code run against one machine from a
+        workstation and against a fleet on a schedule.
 
-        Name a machine with -VMName and it rotates that one, now, whatever its expiry
-        date says and whether or not it carries the enable tag. Naming a machine is a
-        stronger statement of intent than a tag, and this is the form to reach for from
-        a workstation.
+        For each machine it works out what is due (missing, expiring or half-rotated),
+        rotates it, and writes a record of what happened.
 
-        Call it without -VMName and it makes one pass over the estate:
-
-          1. ask Log Analytics which secrets a human read, and pull those expiry
-             dates forward (optional, requires the observability module)
-          2. find every credential that is missing, expiring or half-rotated
-          3. rotate it
-          4. write a record of what happened
-
-        There is no event subscription and no queue. The run is the retry: anything
-        that fails or is skipped - a stopped VM, a throttled call, an unhealthy guest
-        agent - is simply picked up next time. That is what makes the whole thing
-        small enough to reason about.
-
-        Latency is the trade. A credential read at 09:00 with a six-hourly schedule
-        and an eight-hour grace period is replaced some time before 23:00, not within
-        minutes. For credentials that would otherwise sit unchanged for months, that
-        is not a meaningful difference. If it is for you, see
-        docs/decisions/0002-reconciliation-loop-over-events.md, which describes what
-        an event-driven version would need.
-
-    .PARAMETER SubscriptionId
-        Subscriptions to process. Defaults to the current context only - deliberately
-        narrow, so an unscoped run cannot reach further than intended. With -VMName only
-        the first entry is used, because one machine lives in one subscription.
+        Rotation after use is not handled here either. Register-CredentialAccess pulls the
+        expiry date of a credential somebody read forward; this function then sees it as
+        ordinary ageing. One signal, one code path - and the orchestrator decides how often
+        to look.
 
     .PARAMETER VMName
-        Rotate this machine and nothing else. The enable tag is not required and the
-        expiry threshold does not apply. The hold tag still does.
+        Rotate this machine. The expiry threshold does not apply: you named it, so it is
+        rotated. This is the form to reach for from a workstation.
 
     .PARAMETER ResourceGroupName
         Narrows -VMName when the same name exists more than once in the subscription.
         Without it, an ambiguous name is an error rather than a guess.
 
-    .PARAMETER IgnoreHold
-        Rotate even a machine carrying the hold tag. Only available with -VMName: a
-        scheduled run must never talk itself out of a hold.
+    .PARAMETER VM
+        Machines to process, as objects from Get-AzVM. The expiry threshold applies, so
+        only the ones that are actually due are touched. This is what an orchestrator
+        passes after it has selected them.
+
+    .PARAMETER ThresholdDays
+        Rotate a credential whose expiry is this close. Ignored with -VMName.
 
     .EXAMPLE
         Invoke-CredentialRotation -VaultName kv-creds -VMName jump-01 -WhatIf
@@ -1027,47 +994,41 @@ function Invoke-CredentialRotation {
         exist yet, so this is also how a machine is onboarded by hand.
 
     .EXAMPLE
-        Invoke-CredentialRotation -VaultName kv-creds -WhatIf
+        $vms = Get-AzVM | Where-Object { $_.Tags.CredentialRotation -eq 'enabled' }
+        Invoke-CredentialRotation -VaultName kv-creds -VM $vms
 
-        The estate pass: every VM carrying the enable tag whose credential is missing,
-        expiring or half-rotated. This is what the scheduled runbook calls.
+        What an orchestrator does: select the machines however you like, then hand them
+        over. The tag here is the caller's policy, not the module's.
 
     .OUTPUTS
         PSCustomObject summarising the run, with the individual records attached.
     #>
-    [CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'Estate')]
+    # -WhatIf is supported and propagated, but the decision is made where the change is:
+    # Update-VMCredential calls ShouldProcess per credential. Confirming once up here
+    # instead would collapse a dry run into a single line and throw away the per-credential
+    # WhatIf records, which are the reason anybody runs one.
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSShouldProcess', '')]
+    [CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'Named')]
     [OutputType([pscustomobject])]
     param(
         [Parameter(Mandatory)][string]$VaultName,
 
-        [Parameter(Mandatory, ParameterSetName = 'SingleVM')]
+        [Parameter(Mandatory, ParameterSetName = 'Named')]
         [ValidateNotNullOrEmpty()][string]$VMName,
 
-        [Parameter(ParameterSetName = 'SingleVM')][string]$ResourceGroupName,
-        [Parameter(ParameterSetName = 'SingleVM')][switch]$IgnoreHold,
+        [Parameter(ParameterSetName = 'Named')][string]$ResourceGroupName,
 
-        [string[]]$SubscriptionId,
+        [Parameter(Mandatory, ParameterSetName = 'Machines')]
+        [ValidateNotNullOrEmpty()][object[]]$VM,
 
-        # Estate only: a named machine is rotated whatever its expiry says, and was not
-        # found by tag in the first place. Offering these there would be offering a
-        # parameter that does nothing.
-        [Parameter(ParameterSetName = 'Estate')][ValidateRange(0, 3650)][int]$ThresholdDays = 14,
-        [Parameter(ParameterSetName = 'Estate')][string]$EnableTagName = 'CredentialRotation',
-        [Parameter(ParameterSetName = 'Estate')][string]$EnableTagValue = 'enabled',
+        # Only meaningful for a set of machines. A named machine is rotated regardless.
+        [Parameter(ParameterSetName = 'Machines')][ValidateRange(0, 3650)][int]$ThresholdDays = 14,
 
         [ValidateRange(1, 3650)][int]$ValidityDays = 90,
-        [string]$HoldTagName = 'CredentialRotationHold',
+
         [switch]$SkipSshKeys,
         [switch]$RemovePriorSshKeys,
         [switch]$ResetSshConfiguration,
-
-        # Access-triggered rotation. Without a workspace, only expiry drives rotation.
-        # Estate only: the scan is an estate-wide query whose only effect is to move
-        # expiry dates, and a named machine is rotated regardless of its expiry date.
-        [Parameter(ParameterSetName = 'Estate')][string]$WorkspaceId,
-        [Parameter(ParameterSetName = 'Estate')][ValidateRange(0, 168)][int]$GracePeriodHours = 8,
-        [Parameter(ParameterSetName = 'Estate')][ValidateRange(1, 720)][int]$AccessLookbackHours = 24,
-        [Parameter(ParameterSetName = 'Estate')][string[]]$ExcludeObjectId = @(),
 
         # Structured audit records. Without these, the job output is the only trail.
         [string]$DataCollectionEndpoint,
@@ -1078,107 +1039,68 @@ function Invoke-CredentialRotation {
     )
 
     $startTime = Get-Date
-    $single = $PSCmdlet.ParameterSetName -eq 'SingleVM'
+    $named = $PSCmdlet.ParameterSetName -eq 'Named'
     $records = [System.Collections.Generic.List[object]]::new()
 
     $stats = [ordered]@{
-        Candidates   = 0
-        Rotated      = 0
-        Skipped      = 0
-        Failed       = 0
-        AccessMarked = 0
+        Candidates = 0
+        Rotated    = 0
+        Skipped    = 0
+        Failed     = 0
     }
 
     Write-RotationLog -Message '=== Credential rotation started ===' -Level Info
-    if ($single) {
-        Write-RotationLog -Message "Vault: $VaultName | machine: $VMName | validity: $ValidityDays d | named explicitly, tag and threshold do not apply" -Level Info
-    }
-    else {
-        Write-RotationLog -Message "Vault: $VaultName | threshold: $ThresholdDays d | validity: $ValidityDays d | access-driven: $([bool]$WorkspaceId)" -Level Info
-    }
 
     if (-not (Get-AzContext -ErrorAction SilentlyContinue)) {
-        throw 'No Azure context. Connect with Connect-AzAccount -Identity before calling this function.'
+        throw 'No Azure context. Connect with Connect-AzAccount (or -Identity in Automation) first.'
     }
 
-    # --- 1. access-driven expiry updates ------------------------------------
-    # -WorkspaceId belongs to the estate parameter set, so this cannot run for a named
-    # machine: the scan only moves expiry dates, which a named machine ignores anyway.
-    if ($WorkspaceId) {
-        try {
-            $marked = Register-CredentialAccess -VaultName $VaultName -WorkspaceId $WorkspaceId `
-                -GracePeriodHours $GracePeriodHours -LookbackHours $AccessLookbackHours `
-                -ExcludeObjectId $ExcludeObjectId -HoldTagName $HoldTagName
-            $stats.AccessMarked = @($marked).Count
-        }
-        catch {
-            # A workspace problem must not stop expiry-driven rotation.
-            Write-RotationLog -Message "Access scan failed, continuing with expiry-driven rotation only: $($_.Exception.Message)" -Level Error -Scope 'access'
-            $stats.Failed++
-        }
+    # --- the machines --------------------------------------------------------
+    # Named or handed in, but always stated by the caller. Nothing here searches.
+    $machines = if ($named) {
+        Write-RotationLog -Message "Vault: $VaultName | machine: $VMName | validity: $ValidityDays d | named, so the expiry threshold does not apply" -Level Info
+        @(Resolve-TargetVM -Name $VMName -ResourceGroupName $ResourceGroupName)
+    }
+    else {
+        Write-RotationLog -Message "Vault: $VaultName | machines: $(@($VM).Count) | threshold: $ThresholdDays d | validity: $ValidityDays d" -Level Info
+        @($VM)
     }
 
-    # --- 2 & 3. find and rotate ---------------------------------------------
-    # One machine lives in one subscription, so a list would only be a way to get it wrong.
-    $subscriptions = if ($SubscriptionId) {
-        if ($single) { @($SubscriptionId[0]) } else { $SubscriptionId }
+    # --- what is due ---------------------------------------------------------
+    try {
+        $candidates = Get-RotationCandidate -VaultName $VaultName -VM $machines `
+            -ThresholdDays $ThresholdDays -IgnoreExpiry:$named -SkipSshKeys:$SkipSshKeys
     }
-    else { @((Get-AzContext).Subscription.Id) }
+    catch {
+        Write-RotationLog -Message "Could not work out what is due: $($_.Exception.Message)" -Level Error
+        throw
+    }
 
-    foreach ($sub in $subscriptions) {
-        Write-RotationLog -Message "--- Subscription $sub ---" -Level Info
+    $stats.Candidates = @($candidates).Count
+    Write-RotationLog -Message "$(@($candidates).Count) credential(s) to process" -Level Info
 
+    # --- rotate --------------------------------------------------------------
+    foreach ($candidate in $candidates) {
         try {
-            $null = Set-AzContext -SubscriptionId $sub -ErrorAction Stop
-        }
-        catch {
-            Write-RotationLog -Message "Cannot switch to subscription ${sub}: $($_.Exception.Message)" -Level Error
-            $stats.Failed++
-            continue
-        }
+            $record = Update-VMCredential -VaultName $VaultName -VM $candidate.VM `
+                -CredentialType $candidate.CredentialType -ValidityDays $ValidityDays `
+                -TriggerReason $candidate.Reason -TriggeredBy $TriggeredBy `
+                -RemovePriorSshKeys:$RemovePriorSshKeys `
+                -ResetSshConfiguration:$ResetSshConfiguration `
+                -WhatIf:$WhatIfPreference -Confirm:$false
 
-        try {
-            $candidates = if ($single) {
-                Get-RotationCandidate -VaultName $VaultName -VM (Resolve-TargetVM -Name $VMName -ResourceGroupName $ResourceGroupName) `
-                    -IgnoreHold:$IgnoreHold -HoldTagName $HoldTagName -SkipSshKeys:$SkipSshKeys
-            }
-            else {
-                Get-RotationCandidate -VaultName $VaultName -ThresholdDays $ThresholdDays `
-                    -EnableTagName $EnableTagName -EnableTagValue $EnableTagValue `
-                    -HoldTagName $HoldTagName -SkipSshKeys:$SkipSshKeys
+            $records.Add($record)
+
+            switch ($record.Result) {
+                'Rotated' { $stats.Rotated++ }
+                'Skipped' { $stats.Skipped++ }
+                'Failed' { $stats.Failed++ }
+                'WhatIf' { $stats.Skipped++ }
             }
         }
         catch {
-            Write-RotationLog -Message "Discovery failed in subscription ${sub}: $($_.Exception.Message)" -Level Error
+            Write-RotationLog -Message "Unhandled error on $($candidate.VM.Name) ($($candidate.CredentialType)): $($_.Exception.Message)" -Level Error -Scope $candidate.VM.Name
             $stats.Failed++
-            continue
-        }
-
-        $stats.Candidates += @($candidates).Count
-        Write-RotationLog -Message "$(@($candidates).Count) credential(s) to process" -Level Info
-
-        foreach ($candidate in $candidates) {
-            try {
-                $record = Update-VMCredential -VaultName $VaultName -VM $candidate.VM `
-                    -CredentialType $candidate.CredentialType -ValidityDays $ValidityDays `
-                    -TriggerReason $candidate.Reason -TriggeredBy $TriggeredBy `
-                    -RemovePriorSshKeys:$RemovePriorSshKeys `
-                    -ResetSshConfiguration:$ResetSshConfiguration `
-                    -WhatIf:$WhatIfPreference -Confirm:$false
-
-                $records.Add($record)
-
-                switch ($record.Result) {
-                    'Rotated' { $stats.Rotated++ }
-                    'Skipped' { $stats.Skipped++ }
-                    'Failed' { $stats.Failed++ }
-                    'WhatIf' { $stats.Skipped++ }
-                }
-            }
-            catch {
-                Write-RotationLog -Message "Unhandled error on $($candidate.VM.Name) ($($candidate.CredentialType)): $($_.Exception.Message)" -Level Error -Scope $candidate.VM.Name
-                $stats.Failed++
-            }
         }
     }
 
@@ -1196,19 +1118,17 @@ function Invoke-CredentialRotation {
 
     Write-RotationLog -Message '=== Summary ===' -Level Info
     Write-RotationLog -Message "Duration: $($duration.ToString('hh\:mm\:ss'))" -Level Info
-    Write-RotationLog -Message "Expiry pulled forward after access: $($stats.AccessMarked)" -Level Info
     Write-RotationLog -Message "Candidates: $($stats.Candidates) | rotated: $($stats.Rotated) | skipped: $($stats.Skipped) | failed: $($stats.Failed)" `
         -Level $(if ($stats.Failed -gt 0) { 'Warning' } else { 'Success' })
 
     return [pscustomobject]@{
-        StartedAt    = $startTime.ToUniversalTime()
-        Duration     = $duration
-        Candidates   = $stats.Candidates
-        Rotated      = $stats.Rotated
-        Skipped      = $stats.Skipped
-        Failed       = $stats.Failed
-        AccessMarked = $stats.AccessMarked
-        Records      = $records.ToArray()
+        StartedAt  = $startTime.ToUniversalTime()
+        Duration   = $duration
+        Candidates = $stats.Candidates
+        Rotated    = $stats.Rotated
+        Skipped    = $stats.Skipped
+        Failed     = $stats.Failed
+        Records    = $records.ToArray()
     }
 }
 
@@ -1251,8 +1171,7 @@ function Register-CredentialAccess {
 
         [ValidateRange(0, 168)][int]$GracePeriodHours = 8,
         [ValidateRange(1, 720)][int]$LookbackHours = 24,
-        [string[]]$ExcludeObjectId = @(),
-        [string]$HoldTagName = 'CredentialRotationHold'
+        [string[]]$ExcludeObjectId = @()
     )
 
     $accessed = Get-AccessedSecret -WorkspaceId $WorkspaceId -VaultName $VaultName `
@@ -1274,11 +1193,6 @@ function Register-CredentialAccess {
 
         $meta = Get-RotationSecret -VaultName $VaultName -Name $entry.SecretName
         if (-not $meta.Exists) { continue }
-
-        if ($meta.Secret.Tags -and $meta.Secret.Tags[$HoldTagName] -eq 'true') {
-            Write-RotationLog -Message "'$($entry.SecretName)' was read by $($entry.AccessedBy) but is on hold, leaving expiry untouched" -Level Warning -Scope 'access'
-            continue
-        }
 
         $currentExpiry = if ($meta.Secret.Expires) { $meta.Secret.Expires.ToUniversalTime() } else { $null }
 
@@ -1839,24 +1753,120 @@ if ($accountName -and $accountRg -and $PSPrivateMetadata.JobId) {
 }
 
 # ---------------------------------------------------------------------------
-# run
+# orchestrate
+#
+# This is the layer that decides which machines are in scope. The module does not:
+# it rotates the machines it is given and has no opinion about tags. Keeping the
+# policy here is what lets the same module run from a workstation against one machine
+# and from this runbook against a fleet.
 # ---------------------------------------------------------------------------
 
-$params = @{
-    VaultName             = $config.VaultName
-    ThresholdDays         = $config.ThresholdDays
-    ValidityDays          = $config.ValidityDays
-    EnableTagName         = $config.EnableTagName
-    EnableTagValue        = $config.EnableTagValue
-    SkipSshKeys           = $config.SkipSshKeys
-    RemovePriorSshKeys    = $config.RemovePriorSshKeys
-    ResetSshConfiguration = $config.ResetSshConfiguration
-    TriggeredBy           = 'automation'
+function Test-TagValue {
+    # Azure tag keys are case-insensitive, and a tag typed in the portal as
+    # "credentialrotation" must count. Hashtable lookup is not, so match on the key.
+    param($Tags, [string]$Name, [string]$Value)
+    if (-not $Tags) { return $false }
+    $key = $Tags.Keys | Where-Object { $_ -ieq $Name } | Select-Object -First 1
+    if (-not $key) { return $false }
+    return ([string]$Tags[$key]) -eq $Value
 }
-if ($subscriptions) { $params['SubscriptionId'] = $subscriptions }
-foreach ($key in $optional.Keys) { $params[$key] = $optional[$key] }
 
-$summary = Invoke-CredentialRotation @params -WhatIf:$DryRun -Confirm:$false
+$targetSubscriptions = if ($subscriptions) { $subscriptions } else { @((Get-AzContext).Subscription.Id) }
+
+$totals = [ordered]@{ Candidates = 0; Rotated = 0; Skipped = 0; Failed = 0; AccessMarked = 0 }
+
+# Rotation after use, once for the whole run: it moves expiry dates in the vault, and
+# the per-subscription passes below then see those credentials as ordinary ageing.
+if ($workspaceId) {
+    try {
+        $accessParams = @{
+            VaultName        = $config.VaultName
+            WorkspaceId      = $workspaceId
+            GracePeriodHours = $optional['GracePeriodHours']
+            LookbackHours    = $optional['AccessLookbackHours']
+        }
+        if ($optional.ContainsKey('ExcludeObjectId')) { $accessParams['ExcludeObjectId'] = $optional['ExcludeObjectId'] }
+
+        $marked = Register-CredentialAccess @accessParams -WhatIf:$DryRun -Confirm:$false
+        $totals.AccessMarked = @($marked).Count
+    }
+    catch {
+        # A workspace problem must not stop expiry-driven rotation.
+        Write-Warning "Access scan failed, continuing with expiry-driven rotation only: $($_.Exception.Message)"
+        $totals.Failed++
+    }
+}
+
+foreach ($sub in $targetSubscriptions) {
+    Write-Verbose "--- Subscription $sub ---" -Verbose
+
+    try {
+        $null = Set-AzContext -SubscriptionId $sub -ErrorAction Stop
+    }
+    catch {
+        Write-Warning "Cannot switch to subscription ${sub}: $($_.Exception.Message)"
+        $totals.Failed++
+        continue
+    }
+
+    try {
+        # Opt-in, not opt-out. A discovery loop that treated "no secret exists for this
+        # VM" as "rotate it" would, on its first run in an established tenant, change the
+        # local administrator password of every machine it can see - including the ones
+        # whose credentials live in a CMDB nobody told it about.
+        $all = @(Get-AzVM -ErrorAction Stop)
+        $enabled = @($all | Where-Object { Test-TagValue -Tags $_.Tags -Name $config.EnableTagName -Value $config.EnableTagValue })
+        $held = @($enabled | Where-Object { Test-TagValue -Tags $_.Tags -Name $HoldTagName -Value 'true' })
+        $machines = @($enabled | Where-Object { $_ -notin $held })
+    }
+    catch {
+        Write-Warning "Discovery failed in subscription ${sub}: $($_.Exception.Message)"
+        $totals.Failed++
+        continue
+    }
+
+    Write-Verbose "$($enabled.Count) VM(s) tagged $($config.EnableTagName)=$($config.EnableTagValue), $($held.Count) on hold via $HoldTagName" -Verbose
+    foreach ($vm in $held) { Write-Verbose "[$($vm.Name)] on hold, skipping" -Verbose }
+
+    if ($machines.Count -eq 0) { continue }
+
+    # The list form of Get-AzVM has no OSProfile, and the rotation needs the admin
+    # username off it. Fetch each selected machine in full before handing it over.
+    $full = foreach ($vm in $machines) {
+        try { Get-AzVM -ResourceGroupName $vm.ResourceGroupName -Name $vm.Name -ErrorAction Stop }
+        catch {
+            Write-Warning "Could not read $($vm.Name) in full: $($_.Exception.Message)"
+            $totals.Failed++
+        }
+    }
+    $full = @($full)
+    if ($full.Count -eq 0) { continue }
+
+    $params = @{
+        VaultName             = $config.VaultName
+        VM                    = $full
+        ThresholdDays         = $config.ThresholdDays
+        ValidityDays          = $config.ValidityDays
+        SkipSshKeys           = $config.SkipSshKeys
+        RemovePriorSshKeys    = $config.RemovePriorSshKeys
+        ResetSshConfiguration = $config.ResetSshConfiguration
+        TriggeredBy           = 'automation'
+    }
+    if ($optional.ContainsKey('DataCollectionEndpoint')) {
+        $params['DataCollectionEndpoint'] = $optional['DataCollectionEndpoint']
+        $params['DataCollectionRuleId'] = $optional['DataCollectionRuleId']
+        $params['StreamName'] = $optional['StreamName']
+    }
+
+    $result = Invoke-CredentialRotation @params -WhatIf:$DryRun -Confirm:$false
+
+    $totals.Candidates += $result.Candidates
+    $totals.Rotated += $result.Rotated
+    $totals.Skipped += $result.Skipped
+    $totals.Failed += $result.Failed
+}
+
+$summary = [pscustomobject]$totals
 
 if ($DryRun) {
     Write-Warning 'DRY RUN - nothing was changed'
@@ -1864,8 +1874,8 @@ if ($DryRun) {
 
 # The headline numbers go to the output stream, not the verbose one, so they survive
 # even if someone deploys with verbose logging turned off.
-Write-Output ("Rotation summary: candidates={0} rotated={1} skipped={2} failed={3} accessMarked={4} duration={5}" -f `
-    $summary.Candidates, $summary.Rotated, $summary.Skipped, $summary.Failed, $summary.AccessMarked, $summary.Duration.ToString('hh\:mm\:ss'))
+Write-Output ("Rotation summary: candidates={0} rotated={1} skipped={2} failed={3} accessMarked={4}" -f `
+    $summary.Candidates, $summary.Rotated, $summary.Skipped, $summary.Failed, $summary.AccessMarked)
 
 # A runbook that swallows its errors reports Completed, and every alert built on job
 # status is then blind. Throw so the job status reflects reality.

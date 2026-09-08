@@ -1,36 +1,33 @@
 function Get-RotationCandidate {
     <#
     .SYNOPSIS
-        Finds the credentials that need rotating.
+        Works out which credentials on the given machines need rotating.
 
     .DESCRIPTION
-        Opt-in, not opt-out. A VM is only considered when it carries the enable tag.
+        The caller states the machines. This function never searches for them, never
+        reads a tag and has no opinion about which machines belong in scope - that is
+        the orchestrator's job, and keeping it there is what lets the same module run
+        from a workstation against one machine and from a runbook against a fleet.
 
-        This is the difference between a tool and an incident. A discovery loop that
-        treats "no secret exists for this VM" as "rotate it" will, on its first run
-        in an established tenant, change the local administrator password of every
-        machine it can see - including the ones whose credentials live in a CMDB or a
-        password manager that nobody told it about.
-
-        Rotation is triggered by one of five conditions:
+        What it does decide is whether a machine the caller already chose actually has
+        something to rotate. Rotation is triggered by one of five conditions:
 
           ResumePending - a previous run was interrupted after staging a value
           Missing       - no secret yet, or a secret with no expiry date
           Expiry        - the expiry date is within the threshold
           Access        - not detected here; access pulls the expiry date forward,
                           and this function then sees it as Expiry
-          Manual        - a VM was named explicitly through -VM, so it is rotated
-                          whatever its expiry date says
+          Manual        - -IgnoreExpiry was set, so a healthy credential is replaced
+                          anyway
 
     .PARAMETER VM
-        Rotate these VMs instead of discovering tagged ones. Naming a machine is a
-        stronger statement of intent than a tag, so the enable tag is not required and
-        the expiry threshold does not apply - the reason becomes Manual. The hold tag
-        still applies, because it means somebody is working on that machine.
+        The machines to examine. Objects from Get-AzVM, fetched by the caller.
 
-    .PARAMETER IgnoreHold
-        Rotate even a VM carrying the hold tag. Only meaningful with -VM: a scheduled
-        run must never talk itself out of a hold.
+    .PARAMETER IgnoreExpiry
+        Treat a healthy, unexpired credential as due anyway, reported as Manual. This is
+        what somebody naming a single machine means: they asked for that machine, and a
+        threshold quietly deciding to do nothing would be the wrong answer. A scheduled
+        pass leaves it off and lets the expiry date decide.
 
         The last point is the design in one sentence: the expiry date is the only
         signal. Everything else writes to it.
@@ -43,16 +40,11 @@ function Get-RotationCandidate {
     param(
         [Parameter(Mandatory)][string]$VaultName,
 
-        # Explicit machines instead of tag discovery. See the note on -VM in the help.
-        [ValidateNotNullOrEmpty()][object[]]$VM,
-
-        [switch]$IgnoreHold,
+        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][object[]]$VM,
 
         [ValidateRange(0, 3650)][int]$ThresholdDays = 14,
 
-        [string]$EnableTagName = 'CredentialRotation',
-        [string]$EnableTagValue = 'enabled',
-        [string]$HoldTagName = 'CredentialRotationHold',
+        [switch]$IgnoreExpiry,
 
         # Linux VMs get an SSH key rotated unless this is set.
         [switch]$SkipSshKeys
@@ -61,37 +53,10 @@ function Get-RotationCandidate {
     $candidates = [System.Collections.Generic.List[object]]::new()
     $now = (Get-Date).ToUniversalTime()
 
-    # Named machines skip discovery entirely. The tag exists to stop a scheduled run
-    # reaching further than intended; it has nothing to protect when a person types the name.
-    $explicit = $PSBoundParameters.ContainsKey('VM')
-
-    $vms = if ($explicit) {
-        @($VM)
-    }
-    else {
-        @(Get-AzVM -ErrorAction Stop | Where-Object {
-            $_.Tags -and
-            $_.Tags.ContainsKey($EnableTagName) -and
-            $_.Tags[$EnableTagName] -eq $EnableTagValue
-        })
-    }
-
-    if ($explicit) {
-        Write-RotationLog -Message "$($vms.Count) VM(s) named explicitly, tag discovery skipped" -Level Info -Scope 'discovery'
-    }
-    else {
-        Write-RotationLog -Message "$($vms.Count) VM(s) tagged $EnableTagName=$EnableTagValue in this subscription" -Level Info -Scope 'discovery'
-    }
+    $vms = @($VM)
+    Write-RotationLog -Message "$($vms.Count) machine(s) handed in by the caller" -Level Info -Scope 'discovery'
 
     foreach ($vm in $vms) {
-        if ($vm.Tags -and $vm.Tags.ContainsKey($HoldTagName) -and $vm.Tags[$HoldTagName] -eq 'true') {
-            if (-not $IgnoreHold) {
-                Write-RotationLog -Message "On hold via $HoldTagName, skipping" -Level Warning -Scope $vm.Name
-                continue
-            }
-            Write-RotationLog -Message "On hold via $HoldTagName, overridden by -IgnoreHold" -Level Warning -Scope $vm.Name
-        }
-
         $adminUsername = $vm.OSProfile.AdminUsername
         if ([string]::IsNullOrWhiteSpace($adminUsername)) {
             Write-RotationLog -Message 'No admin username in the OS profile (specialised image?), skipping' -Level Warning -Scope $vm.Name
@@ -136,17 +101,13 @@ function Get-RotationCandidate {
                 if (-not $secret.Exists) {
                     $reason = 'Missing'
                 }
-                elseif ($secret.Secret.Tags -and $secret.Secret.Tags[$HoldTagName] -eq 'true' -and -not $IgnoreHold) {
-                    Write-RotationLog -Message "Secret '$secretName' is on hold, skipping" -Level Warning -Scope $vm.Name
-                    continue
-                }
                 elseif ($null -eq $secret.Secret.Expires) {
                     $reason = 'Missing'
                     Write-RotationLog -Message "Secret '$secretName' has no expiry date" -Level Warning -Scope $vm.Name
                 }
-                elseif ($explicit) {
-                    # Named on the command line: rotate it, whatever the expiry says. Anything
-                    # else would silently do nothing for a machine somebody asked about.
+                elseif ($IgnoreExpiry) {
+                    # Asked for explicitly: rotate it whatever the expiry says. Anything else
+                    # would silently do nothing for a machine somebody named.
                     $expiresOn = $secret.Secret.Expires.ToUniversalTime()
                     $reason = 'Manual'
                 }
