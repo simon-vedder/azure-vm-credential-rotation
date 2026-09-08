@@ -29,6 +29,11 @@
     CR_AccessRotationEnabled. Deploy neither and the runbook falls back to plain
     expiry-driven rotation.
 
+.PARAMETER SecretNameTemplate
+    How secret names are built, from {vm}, {user}, {rg} and {kind}. Defaults to the shape
+    this tool has always used. Set it where two machines could share a name, or where the
+    vault already has a convention; it has to stay the same for the life of a secret.
+
 .PARAMETER HoldTagName
     VM tag that takes a machine out of scope for this run without untagging it. Checked
     here rather than in the module, because it is a policy statement about a machine
@@ -59,6 +64,11 @@ param(
 
     [string]$EnableTagName,
     [string]$EnableTagValue,
+
+    # A vault with its own convention, or an estate where two machines can share a name -
+    # a VM name is unique in a resource group, not in a subscription, so '{rg}-{vm}-{kind}'
+    # is what keeps those two apart. Must stay the same for the life of a secret.
+    [string]$SecretNameTemplate,
 
     # Not an automation variable on purpose: adding one would change the deployment
     # contract that Bicep, Terraform and the contract test all agree on, for a name
@@ -166,6 +176,7 @@ $config = @{
     ValidityDays          = [int](Get-RunbookSetting -Name 'ValidityDays' -Value $ValidityDays -Default 90)
     EnableTagName         = Get-RunbookSetting -Name 'EnableTagName' -Value $EnableTagName -Default 'CredentialRotation'
     EnableTagValue        = Get-RunbookSetting -Name 'EnableTagValue' -Value $EnableTagValue -Default 'enabled'
+    SecretNameTemplate    = Get-RunbookSetting -Name 'SecretNameTemplate' -Value $SecretNameTemplate -Default '{vm}-{user}-{kind}'
     SkipSshKeys           = $SkipSshKeys
     RemovePriorSshKeys    = $RemovePriorSshKeys
     ResetSshConfiguration = $ResetSshConfiguration
@@ -358,6 +369,8 @@ if ($workspaceId) {
         $reads = @(Get-AccessedSecret @queryParams)
         Write-Verbose "$($reads.Count) secret(s) read by a person in the last $($optional['AccessLookbackHours']) h" -Verbose
 
+        # No template here on purpose: the audit log reports the secret name that was read,
+        # so the name arrives from the vault rather than being rebuilt.
         $marked = @($reads | Register-CredentialAccess -VaultName $config.VaultName `
                 -GracePeriodHours $optional['GracePeriodHours'] -WhatIf:$DryRun -Confirm:$false)
         $totals.AccessMarked = @($marked | Where-Object { $_.Applied }).Count
@@ -423,6 +436,7 @@ foreach ($sub in $targetSubscriptions) {
         OnlyIfDue             = $true
         ThresholdDays         = $config.ThresholdDays
         ValidityDays          = $config.ValidityDays
+        SecretNameTemplate    = $config.SecretNameTemplate
         SkipSshKeys           = $config.SkipSshKeys
         RemovePriorSshKeys    = $config.RemovePriorSshKeys
         ResetSshConfiguration = $config.ResetSshConfiguration

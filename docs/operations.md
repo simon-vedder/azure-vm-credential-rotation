@@ -91,6 +91,11 @@ real workspace, before relying on it.
 
 ## Things that will surprise someone eventually
 
+- **A hardened guest may expire the password first.** The tool sets a credential; it does not
+  read the guest's own aging policy. If the machine enforces a maximum password age shorter
+  than `validityDays` - the CIS STIG image for Ubuntu uses 60 days against a default of 90 -
+  the password expires in the guest weeks before anything schedules a rotation. Set
+  `validityDays` below the shortest maximum age in the estate.
 - **Copies of credentials go stale.** Anything written into a CMDB, a wiki or a
   personal password manager stops working after a rotation, silently. Point people at
   the vault rather than at a copy.

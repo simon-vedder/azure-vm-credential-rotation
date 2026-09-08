@@ -15,11 +15,21 @@ function Resolve-SecretName {
         ssh-pub  - SSH public key, Linux
         pending  - staged value written before the VM is updated, see Update-VMCredential
 
+    .PARAMETER ResourceGroupName
+        Fills {rg}. Required only when the template uses it.
+
     .PARAMETER Template
-        How the name is built, with {vm}, {user} and {kind} as placeholders. The default
-        is the shape this tool has always used. It has to contain {vm} and {kind}: without
-        the first every machine lands on the same secret, without the second a password
-        and an SSH key do. {user} is optional, for vaults that already key by machine.
+        How the name is built, with {vm}, {user}, {rg} and {kind} as placeholders. The
+        default is the shape this tool has always used. It has to contain {vm} and {kind}:
+        without the first every machine lands on the same secret, without the second a
+        password and an SSH key do. {user} is optional, for vaults that already key by
+        machine.
+
+        {rg} exists because a VM name is not unique in a subscription. Two machines called
+        web-01 in different resource groups resolve to one secret under the default
+        template, and the vault then holds a credential that works on one of them with
+        nothing saying which - see KNOWN-ISSUES. Where that can happen, key the name by
+        resource group as well: '{rg}-{vm}-{kind}'.
     #>
     [CmdletBinding()]
     [OutputType([string])]
@@ -27,6 +37,7 @@ function Resolve-SecretName {
         [Parameter(Mandatory)][string]$VMName,
         [Parameter(Mandatory)][string]$AdminUsername,
         [Parameter(Mandatory)][ValidateSet('pw', 'ssh-priv', 'ssh-pub')][string]$Kind,
+        [string]$ResourceGroupName,
         [switch]$Pending,
         [ValidateNotNullOrEmpty()][string]$Template = '{vm}-{user}-{kind}'
     )
@@ -37,6 +48,11 @@ function Resolve-SecretName {
         }
     }
 
+    # Silently dropping {rg} would produce a name that looks deliberate and collides anyway.
+    if ($Template -like '*{rg}*' -and [string]::IsNullOrWhiteSpace($ResourceGroupName)) {
+        throw "Secret name template '$Template' uses {rg}, but no resource group name was supplied."
+    }
+
     $normalise = {
         param($value)
         ($value -replace '[^a-zA-Z0-9-]', '-') -replace '-+', '-'
@@ -45,6 +61,7 @@ function Resolve-SecretName {
     $name = $Template.
         Replace('{vm}', (& $normalise $VMName)).
         Replace('{user}', (& $normalise $AdminUsername)).
+        Replace('{rg}', (& $normalise ([string]$ResourceGroupName))).
         Replace('{kind}', $Kind)
     # Literal characters in the template get the same treatment as the values.
     $name = (& $normalise $name)

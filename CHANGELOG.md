@@ -1,11 +1,24 @@
 # Changelog
 
-## [Unreleased]
-
-Deployment and lab only; the module on the Gallery is unchanged at 0.3.0.
+## [0.4.0] — unreleased
 
 ### Added
 
+- **`{rg}` in `-SecretNameTemplate`.** A VM name is unique in a resource group, not in a
+  subscription, and the default template uses neither the group nor the subscription, so
+  two machines called `web-01` resolved to one secret and the vault ended up holding a
+  credential that works on one of them with nothing saying which. Found while building the
+  scale lab. `-SecretNameTemplate '{rg}-{vm}-{kind}'` separates them; a template that uses
+  `{rg}` without a resource group is refused rather than silently collapsed. The default is
+  unchanged, so nothing moves under an existing estate. See KNOWN-ISSUES.
+- **`CR_SecretNameTemplate`**, so the deployed path can use it. The runbook had no way to set
+  a template at all, which would have left the fix above unavailable exactly where duplicate
+  names are likely. Eighteen `CR_*` variables now, in Bicep, Terraform and the contract test.
+  The access scan deliberately does not use it: the audit log reports the name that was read.
+
+- `deploy/lab-scale.bicep` and `tests/manual/Measure-RotationThroughput.ps1`: a fleet of small
+  Linux machines and a script that times the four phases a pass is made of, so the scale limit
+  can be stated from measurement instead of estimated.
 - **Machines in other subscriptions.** `deploy/main.bicep` takes `targetResourceGroupIds`
   (resource groups anywhere in the tenant, by resource ID) next to `targetResourceGroupNames`
   (this subscription, by name), and assigns Virtual Machine Contributor where each group
@@ -31,7 +44,7 @@ Deployment and lab only; the module on the Gallery is unchanged at 0.3.0.
   subscription, `Connect-AzAccount -Identity` chose that one, the concurrent-job check
   looked for the automation account in the wrong place, and two jobs ran side by side. The
   new `CR_AutomationSubscriptionId` variable says where home is; older deployments without
-  it are searched for. Seventeen `CR_*` variables.
+  it are searched for.
 - A deployment into an account that was deleted and recreated under the same names failed
   with `A jobSchedule with same id already exists`, because Automation keeps job-schedule
   ids beyond the account's life. The id is seeded with a per-deployment stamp.

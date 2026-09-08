@@ -67,8 +67,8 @@ function Update-VMCredential {
     }
 
     $kind = if ($CredentialType -eq 'Password') { 'pw' } else { 'ssh-priv' }
-    $secretName = Resolve-SecretName -VMName $VM.Name -AdminUsername $adminUsername -Kind $kind -Template $SecretNameTemplate
-    $pendingName = Resolve-SecretName -VMName $VM.Name -AdminUsername $adminUsername -Kind $kind -Pending -Template $SecretNameTemplate
+    $secretName = Resolve-SecretName -VMName $VM.Name -AdminUsername $adminUsername -Kind $kind -ResourceGroupName $VM.ResourceGroupName -Template $SecretNameTemplate
+    $pendingName = Resolve-SecretName -VMName $VM.Name -AdminUsername $adminUsername -Kind $kind -ResourceGroupName $VM.ResourceGroupName -Pending -Template $SecretNameTemplate
 
     $record = @{
         SecretName        = $secretName
@@ -173,7 +173,7 @@ function Update-VMCredential {
     # The public key is not secret, but keeping it beside the private key saves
     # anyone from having to derive it later.
     if ($CredentialType -eq 'SSHKey' -and $publicKey) {
-        $publicName = Resolve-SecretName -VMName $VM.Name -AdminUsername $adminUsername -Kind 'ssh-pub' -Template $SecretNameTemplate
+        $publicName = Resolve-SecretName -VMName $VM.Name -AdminUsername $adminUsername -Kind 'ssh-pub' -ResourceGroupName $VM.ResourceGroupName -Template $SecretNameTemplate
         $null = Set-AzKeyVaultSecret -VaultName $VaultName -Name $publicName `
             -SecretValue (ConvertTo-SecureString -String $publicKey -AsPlainText -Force) `
             -Expires (Get-Date).ToUniversalTime().AddDays($ValidityDays) `

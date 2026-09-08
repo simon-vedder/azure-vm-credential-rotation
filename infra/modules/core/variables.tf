@@ -107,6 +107,17 @@ variable "enable_tag_value" {
   default     = "enabled"
 }
 
+variable "secret_name_template" {
+  description = "How secret names are built, from {vm}, {user}, {rg} and {kind}. Use {rg} where two machines could share a name; a VM name is unique in a resource group, not in a subscription. Must stay the same for the life of a secret."
+  type        = string
+  default     = "{vm}-{user}-{kind}"
+
+  validation {
+    condition     = can(regex("\\{vm\\}", var.secret_name_template)) && can(regex("\\{kind\\}", var.secret_name_template))
+    error_message = "The template must contain {vm} and {kind}, otherwise different credentials collide on one secret."
+  }
+}
+
 variable "dry_run" {
   description = <<-EOT
     Run the schedule in -WhatIf mode: report what would be rotated, change nothing.

@@ -33,7 +33,7 @@ Get-RotationCandidate [-VaultName] <string> [-VM] <Object[]> [[-ThresholdDays] <
 | `-OnlyIfDue` | SwitchParameter | no | no |  | Consult the expiry date instead of rotating regardless. Without it every machine handed in is a candidate, which is what asking for a machine means. A scheduled pass sets it, so it touches only what is missing, half-rotated or near expiry. |
 | `-ThresholdDays` | Int32 | no | no | 14 | How close to expiry counts as due. Only consulted with -OnlyIfDue. |
 | `-SkipSshKeys` | SwitchParameter | no | no |  | Linux VMs get an SSH key rotated unless this is set. |
-| `-SecretNameTemplate` | String | no | no | {vm}-{user}-{kind} | How secret names are built from {vm}, {user} and {kind}. Must match what was used when the secrets were written, or nothing will be found. The last point is the design in one sentence: the expiry date is the only signal. Everything else writes to it. |
+| `-SecretNameTemplate` | String | no | no | {vm}-{user}-{kind} | How secret names are built from {vm}, {user}, {rg} and {kind}. Must match what was used when the secrets were written, or nothing will be found. The last point is the design in one sentence: the expiry date is the only signal. Everything else writes to it. |
 
 ## Examples
 

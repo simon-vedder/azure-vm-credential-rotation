@@ -40,8 +40,10 @@ function Invoke-CredentialRotation {
         How close to expiry counts as due. Only consulted with -OnlyIfDue.
 
     .PARAMETER SecretNameTemplate
-        How secret names are built from {vm}, {user} and {kind}. Change it to fit a vault
-        that already has a naming convention; keep it the same for the life of a secret.
+        How secret names are built from {vm}, {user}, {rg} and {kind}. Change it to fit a
+        vault that already has a naming convention; keep it the same for the life of a
+        secret. Use {rg} where two machines could share a name - a VM name is not unique in
+        a subscription, and the default template would put both on one secret.
 
     .EXAMPLE
         Invoke-CredentialRotation -VaultName kv-creds -VMName jump-01 -WhatIf

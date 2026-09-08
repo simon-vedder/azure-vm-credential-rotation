@@ -39,7 +39,7 @@ Invoke-CredentialRotation -VaultName <string> -VM <Object[]> [-OnlyIfDue] [-Thre
 | `-SkipSshKeys` | SwitchParameter | no | no |  |  |
 | `-RemovePriorSshKeys` | SwitchParameter | no | no |  |  |
 | `-ResetSshConfiguration` | SwitchParameter | no | no |  |  |
-| `-SecretNameTemplate` | String | no | no | {vm}-{user}-{kind} | How secret names are built from {vm}, {user} and {kind}. Change it to fit a vault that already has a naming convention; keep it the same for the life of a secret. |
+| `-SecretNameTemplate` | String | no | no | {vm}-{user}-{kind} | How secret names are built from {vm}, {user}, {rg} and {kind}. Change it to fit a vault that already has a naming convention; keep it the same for the life of a secret. Use {rg} where two machines could share a name - a VM name is not unique in a subscription, and the default template would put both on one secret. |
 | `-TriggeredBy` | String | no | no |  |  |
 
 Supports `-WhatIf` and `-Confirm`.

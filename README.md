@@ -308,7 +308,7 @@ Through the deployed runbook (`Invoke-OrchestratorSmokeTest.ps1`), with the auto
 account in one subscription and machines in two:
 
 - the Bicep deployment at subscription scope: automation account, module 0.3.0 from the
-  Gallery, runbook, schedule, the 17 variables, role assignments in both subscriptions,
+  Gallery, runbook, schedule, the 18 variables, role assignments in both subscriptions,
   workspace, custom table, ingestion endpoint and rule, diagnostic settings, workbook - and
   a redeployment with `dryRun=false` that actually takes effect
 - a dry run reports the tagged machines in every subscription and what it would rotate, and
@@ -323,16 +323,30 @@ account in one subscription and machines in two:
 
 Still unverified, and worth knowing before you rely on them:
 
-- **Scale.** Tested with a handful of VMs. The limit is not ARM throttling - a run makes five
-  to seven calls per tagged machine, far below the token-bucket limits - but throughput:
-  rotations run one after another, each VMAccess round trip took 30 to 60 seconds in the lab,
-  and Automation unloads a job after three hours. Call it 150 to 250 rotations per job. In
-  steady state that is plenty (2,000 machines on a 90-day validity need about 22 a day); the
-  one wave that exceeds it is the first onboarding of a large fleet, when every credential is
-  missing at once. Tag in batches and let the schedule catch up - whatever a job does not
-  reach is picked up by the next one.
-- **CIS Level 2 and other hardening.** Level 1 passed on both platforms; Level 2 and custom
-  baselines were not run.
+- **Scale beyond a few thousand machines.** Measured on 2026-09-08 rather than estimated, on a
+  twelve-machine fleet across two regions (`deploy/lab-scale.bicep`,
+  `tests/manual/Measure-RotationThroughput.ps1`), and then again through the deployed runbook,
+  which is where Automation's three-hour job limit applies:
+
+  | | workstation | Automation sandbox |
+  |---|---|---|
+  | reconciling one machine, nothing due | 1.6 s | 3.1 s |
+  | rotating one credential | 35.3 s | 35.4 s |
+  | machines in one 3-hour job, nothing due | ~6,500 | ~3,500 |
+  | credentials in one 3-hour job, all due | ~305 | ~304 |
+
+  The rotation figure is the same in both places because it is dominated by the VMAccess
+  round trip, not by anything local. So the limit is throughput, not ARM throttling: a pass
+  makes five to seven calls per machine, far below the token-bucket limits, and the read paths
+  are cheap enough that a scheduled pass over a few thousand machines fits comfortably.
+
+  What does not fit is the first wave over a large estate, when every credential is missing at
+  once: 304 per job, whatever the estate. In steady state that is ample — 2,000 machines on a
+  90-day validity come due at about 22 a day. Onboard in batches and let the schedule catch
+  up; whatever a job does not reach is picked up by the next one. Above roughly three thousand
+  machines, split the estate across several automation accounts by tag or subscription.
+- **CIS Level 2 on Linux.** There is no CIS Level 2 image for Ubuntu in the marketplace. The
+  STIG build was run instead and passed; a hand-built Level 2 baseline is untested.
 - **Terraform.** The Bicep path is the one exercised live. The Terraform modules deploy the
   same runbook from the committed build artefact and are validated in CI; their last live
   deployment was with 0.1.0.
