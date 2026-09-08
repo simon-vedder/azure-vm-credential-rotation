@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.2.0] — 2026-09-08
+
+### Added
+
+- **Rotate one named machine, from your own workstation.**
+  `Invoke-CredentialRotation -VaultName kv-creds -VMName jump-01` rotates that machine
+  and nothing else. The enable tag is not required and the expiry threshold does not
+  apply, because naming a machine is a stronger statement of intent than a tag — the
+  same reasoning the sibling tool uses for `-Target`. The secret is created in the vault
+  if it is not there yet, so this is also how a machine is onboarded by hand.
+
+  Until now the only local route was `Update-VMCredential`, which takes a VM *object* and
+  a credential type: an internal interface, not an entry point.
+
+- `-IgnoreHold`, available only with `-VMName`. The hold tag means somebody is working on
+  that machine, so it still applies when you name it; overriding is possible but has to be
+  said out loud. A scheduled run cannot talk itself out of a hold at all.
+
+- `Get-RotationCandidate -VM`, the same thing one level down, for callers that already
+  hold VM objects.
+
+### Changed
+
+- `-ThresholdDays`, `-EnableTagName`, `-EnableTagValue`, `-WorkspaceId`, `-GracePeriodHours`,
+  `-AccessLookbackHours` and `-ExcludeObjectId` are now on the estate parameter set only.
+  They did nothing when a machine was named, and a parameter that silently does nothing is
+  a small lie.
+
+### Notes
+
+- `Resolve-TargetVM` refuses an ambiguous name instead of taking the first match, and names
+  the resource groups it found. It also re-fetches the machine by resource group, because
+  the list form of `Get-AzVM` returns no `OSProfile` — which downstream would have reported
+  as "specialised image" rather than "found".
+
 ## [0.1.0] — 2026-09-08
 
 First published release, verified end to end against a live Azure tenant. See the status

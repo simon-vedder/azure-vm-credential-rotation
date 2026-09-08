@@ -60,7 +60,39 @@ describes what an event-driven version would take and why it costs more than it 
 
 ---
 
-## Deploy
+## Run it against one machine
+
+Nothing deployed, nothing to clean up afterwards. This is the first thing to try, and it
+is also how a machine is onboarded by hand — the secret is created in the vault if it is
+not there yet.
+
+```powershell
+Install-Module AzureVMCredentialRotation
+Connect-AzAccount
+
+# See what would happen. Always this first.
+Invoke-CredentialRotation -VaultName kv-creds -VMName jump-01 -WhatIf
+
+# Do it.
+Invoke-CredentialRotation -VaultName kv-creds -VMName jump-01
+```
+
+Naming a machine is a stronger statement of intent than a tag, so `-VMName` needs no
+enable tag and ignores the expiry threshold: you asked for this machine, it gets rotated.
+The **hold tag still applies** — it means somebody is working on that machine — and
+`-IgnoreHold` overrides it if you mean to.
+
+Your own account needs Key Vault Secrets Officer on the vault and Virtual Machine
+Contributor on the VM. That is the difference from the scheduled form, where a managed
+identity holds those instead of you.
+
+What you do not get this way is the *loop*: the retry for a machine that was powered off,
+and rotation within hours of somebody reading a credential. Both need something running on
+a schedule.
+
+---
+
+## Deploy the orchestrator
 
 Two ways in, one tool. They create the same resources and configure the runbook through the same
 `CR_*` automation variables — a test compares the two sets on every push, so they cannot quietly
@@ -76,7 +108,7 @@ Or one command, everything in it, dry-run by default:
 az deployment sub create \
   --location switzerlandnorth \
   --template-file deploy/main.bicep \
-  --parameters moduleVersion=0.1.0 \
+  --parameters moduleVersion=0.2.0 \
                keyVaultName=kv-credentials \
                keyVaultResourceGroupName=rg-vault \
                targetResourceGroupNames='["rg-workloads"]'
@@ -192,12 +224,12 @@ so it can be tested and run locally. Azure Automation executes one script per jo
 `build/Build-Runbook.ps1` flattens it into [`infra/modules/core/runbook/`](infra/modules/core/runbook), which is committed —
 deploying needs no build step. CI fails if the two drift apart.
 
-Run it locally against a single VM before trusting a schedule:
+Against a real tenant, from the working copy rather than the Gallery build:
 
 ```powershell
 Import-Module ./src/AzureVMCredentialRotation
 Connect-AzAccount
-Invoke-CredentialRotation -VaultName kv-creds -WhatIf
+Invoke-CredentialRotation -VaultName kv-creds -VMName jump-01 -WhatIf
 ```
 
 ---

@@ -4,7 +4,14 @@ function Invoke-CredentialRotation {
         Reconciles VM credentials against their Key Vault expiry dates.
 
     .DESCRIPTION
-        One pass over the estate:
+        Two ways to call it.
+
+        Name a machine with -VMName and it rotates that one, now, whatever its expiry
+        date says and whether or not it carries the enable tag. Naming a machine is a
+        stronger statement of intent than a tag, and this is the form to reach for from
+        a workstation.
+
+        Call it without -VMName and it makes one pass over the estate:
 
           1. ask Log Analytics which secrets a human read, and pull those expiry
              dates forward (optional, requires the observability module)
@@ -26,38 +33,75 @@ function Invoke-CredentialRotation {
 
     .PARAMETER SubscriptionId
         Subscriptions to process. Defaults to the current context only - deliberately
-        narrow, so an unscoped run cannot reach further than intended.
+        narrow, so an unscoped run cannot reach further than intended. With -VMName only
+        the first entry is used, because one machine lives in one subscription.
+
+    .PARAMETER VMName
+        Rotate this machine and nothing else. The enable tag is not required and the
+        expiry threshold does not apply. The hold tag still does.
+
+    .PARAMETER ResourceGroupName
+        Narrows -VMName when the same name exists more than once in the subscription.
+        Without it, an ambiguous name is an error rather than a guess.
+
+    .PARAMETER IgnoreHold
+        Rotate even a machine carrying the hold tag. Only available with -VMName: a
+        scheduled run must never talk itself out of a hold.
+
+    .EXAMPLE
+        Invoke-CredentialRotation -VaultName kv-creds -VMName jump-01 -WhatIf
+
+        Shows what would happen to one machine, from your own workstation, without
+        deploying anything. Always the first thing to run.
+
+    .EXAMPLE
+        Invoke-CredentialRotation -VaultName kv-creds -VMName jump-01
+
+        Rotates that machine now. The secret is created in the vault if it does not
+        exist yet, so this is also how a machine is onboarded by hand.
 
     .EXAMPLE
         Invoke-CredentialRotation -VaultName kv-creds -WhatIf
 
-        Reports what would be rotated without touching anything. Always the first run.
+        The estate pass: every VM carrying the enable tag whose credential is missing,
+        expiring or half-rotated. This is what the scheduled runbook calls.
 
     .OUTPUTS
         PSCustomObject summarising the run, with the individual records attached.
     #>
-    [CmdletBinding(SupportsShouldProcess)]
+    [CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'Estate')]
     [OutputType([pscustomobject])]
     param(
         [Parameter(Mandatory)][string]$VaultName,
 
+        [Parameter(Mandatory, ParameterSetName = 'SingleVM')]
+        [ValidateNotNullOrEmpty()][string]$VMName,
+
+        [Parameter(ParameterSetName = 'SingleVM')][string]$ResourceGroupName,
+        [Parameter(ParameterSetName = 'SingleVM')][switch]$IgnoreHold,
+
         [string[]]$SubscriptionId,
 
-        [ValidateRange(0, 3650)][int]$ThresholdDays = 14,
-        [ValidateRange(1, 3650)][int]$ValidityDays = 90,
+        # Estate only: a named machine is rotated whatever its expiry says, and was not
+        # found by tag in the first place. Offering these there would be offering a
+        # parameter that does nothing.
+        [Parameter(ParameterSetName = 'Estate')][ValidateRange(0, 3650)][int]$ThresholdDays = 14,
+        [Parameter(ParameterSetName = 'Estate')][string]$EnableTagName = 'CredentialRotation',
+        [Parameter(ParameterSetName = 'Estate')][string]$EnableTagValue = 'enabled',
 
-        [string]$EnableTagName = 'CredentialRotation',
-        [string]$EnableTagValue = 'enabled',
+        [ValidateRange(1, 3650)][int]$ValidityDays = 90,
         [string]$HoldTagName = 'CredentialRotationHold',
         [switch]$SkipSshKeys,
         [switch]$RemovePriorSshKeys,
         [switch]$ResetSshConfiguration,
 
         # Access-triggered rotation. Without a workspace, only expiry drives rotation.
-        [string]$WorkspaceId,
-        [ValidateRange(0, 168)][int]$GracePeriodHours = 8,
-        [ValidateRange(1, 720)][int]$AccessLookbackHours = 24,
-        [string[]]$ExcludeObjectId = @(),
+        # Estate only: the scan is an estate-wide query whose only effect is to move
+        # expiry dates, and a named machine is rotated regardless of its expiry date.
+        [Parameter(ParameterSetName = 'Estate')][string]$WorkspaceId,
+        [Parameter(ParameterSetName = 'Estate')][ValidateRange(0, 168)][int]$GracePeriodHours = 8,
+        [Parameter(ParameterSetName = 'Estate')][ValidateRange(1, 720)][int]$AccessLookbackHours = 24,
+        [Parameter(ParameterSetName = 'Estate')][string[]]$ExcludeObjectId = @(),
 
         # Structured audit records. Without these, the job output is the only trail.
         [string]$DataCollectionEndpoint,
@@ -68,6 +112,7 @@ function Invoke-CredentialRotation {
     )
 
     $startTime = Get-Date
+    $single = $PSCmdlet.ParameterSetName -eq 'SingleVM'
     $records = [System.Collections.Generic.List[object]]::new()
 
     $stats = [ordered]@{
@@ -79,13 +124,20 @@ function Invoke-CredentialRotation {
     }
 
     Write-RotationLog -Message '=== Credential rotation started ===' -Level Info
-    Write-RotationLog -Message "Vault: $VaultName | threshold: $ThresholdDays d | validity: $ValidityDays d | access-driven: $([bool]$WorkspaceId)" -Level Info
+    if ($single) {
+        Write-RotationLog -Message "Vault: $VaultName | machine: $VMName | validity: $ValidityDays d | named explicitly, tag and threshold do not apply" -Level Info
+    }
+    else {
+        Write-RotationLog -Message "Vault: $VaultName | threshold: $ThresholdDays d | validity: $ValidityDays d | access-driven: $([bool]$WorkspaceId)" -Level Info
+    }
 
     if (-not (Get-AzContext -ErrorAction SilentlyContinue)) {
         throw 'No Azure context. Connect with Connect-AzAccount -Identity before calling this function.'
     }
 
     # --- 1. access-driven expiry updates ------------------------------------
+    # -WorkspaceId belongs to the estate parameter set, so this cannot run for a named
+    # machine: the scan only moves expiry dates, which a named machine ignores anyway.
     if ($WorkspaceId) {
         try {
             $marked = Register-CredentialAccess -VaultName $VaultName -WorkspaceId $WorkspaceId `
@@ -101,7 +153,11 @@ function Invoke-CredentialRotation {
     }
 
     # --- 2 & 3. find and rotate ---------------------------------------------
-    $subscriptions = if ($SubscriptionId) { $SubscriptionId } else { @((Get-AzContext).Subscription.Id) }
+    # One machine lives in one subscription, so a list would only be a way to get it wrong.
+    $subscriptions = if ($SubscriptionId) {
+        if ($single) { @($SubscriptionId[0]) } else { $SubscriptionId }
+    }
+    else { @((Get-AzContext).Subscription.Id) }
 
     foreach ($sub in $subscriptions) {
         Write-RotationLog -Message "--- Subscription $sub ---" -Level Info
@@ -116,9 +172,15 @@ function Invoke-CredentialRotation {
         }
 
         try {
-            $candidates = Get-RotationCandidate -VaultName $VaultName -ThresholdDays $ThresholdDays `
-                -EnableTagName $EnableTagName -EnableTagValue $EnableTagValue `
-                -HoldTagName $HoldTagName -SkipSshKeys:$SkipSshKeys
+            $candidates = if ($single) {
+                Get-RotationCandidate -VaultName $VaultName -VM (Resolve-TargetVM -Name $VMName -ResourceGroupName $ResourceGroupName) `
+                    -IgnoreHold:$IgnoreHold -HoldTagName $HoldTagName -SkipSshKeys:$SkipSshKeys
+            }
+            else {
+                Get-RotationCandidate -VaultName $VaultName -ThresholdDays $ThresholdDays `
+                    -EnableTagName $EnableTagName -EnableTagValue $EnableTagValue `
+                    -HoldTagName $HoldTagName -SkipSshKeys:$SkipSshKeys
+            }
         }
         catch {
             Write-RotationLog -Message "Discovery failed in subscription ${sub}: $($_.Exception.Message)" -Level Error

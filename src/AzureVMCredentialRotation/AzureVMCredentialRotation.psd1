@@ -1,6 +1,6 @@
 @{
     RootModule        = 'AzureVMCredentialRotation.psm1'
-    ModuleVersion     = '0.1.0'
+    ModuleVersion     = '0.2.0'
     GUID              = 'b3f1c2d4-5e6a-4b7c-8d9e-0a1b2c3d4e5f'
     Author            = 'Simon Vedder'
     Description       = 'Credential lifecycle for Azure VMs that cannot use Windows LAPS or Entra login. Rotates local admin passwords and SSH keys, driven by Key Vault expiry dates.'
