@@ -1,0 +1,1272 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2018-05-01/subscriptionDeploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.46.1.21595",
+      "templateHash": "43145401160278433"
+    }
+  },
+  "parameters": {
+    "location": {
+      "type": "string",
+      "defaultValue": "switzerlandnorth",
+      "metadata": {
+        "description": "Region for the resource group and everything in it."
+      }
+    },
+    "resourceGroupName": {
+      "type": "string",
+      "defaultValue": "rg-credential-rotation"
+    },
+    "automationAccountName": {
+      "type": "string",
+      "defaultValue": "aa-credential-rotation"
+    },
+    "moduleVersion": {
+      "type": "string",
+      "metadata": {
+        "description": "CredentialRotation module version on the PowerShell Gallery."
+      }
+    },
+    "contentVersion": {
+      "type": "string",
+      "defaultValue": "",
+      "minLength": 0,
+      "metadata": {
+        "description": "Version stamp written to the module and runbook content links, System.Version form (up to four numeric parts). Defaults to moduleVersion with any pre-release suffix stripped, because Automation rejects one; bump it to force Automation to re-import unchanged URIs."
+      }
+    },
+    "modulePackageUri": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Override the module package source, for example a GitHub release asset before the first Gallery release. Empty means the Gallery URL for moduleVersion."
+      }
+    },
+    "runbookContentUri": {
+      "type": "string",
+      "defaultValue": "https://raw.githubusercontent.com/simon-vedder/azure-vm-credential-rotation/main/src/runbooks/Invoke-CredentialRotationRunbook.ps1",
+      "metadata": {
+        "description": "Raw URL of the runbook wrapper. Pin to a tag in production."
+      }
+    },
+    "keyVaultName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the existing Key Vault that stores the credentials. Must have RBAC authorisation enabled."
+      }
+    },
+    "keyVaultResourceGroupName": {
+      "type": "string",
+      "metadata": {
+        "description": "Resource group holding that Key Vault. It must be in this subscription."
+      }
+    },
+    "targetResourceGroupNames": {
+      "type": "array",
+      "defaultValue": [],
+      "metadata": {
+        "description": "Resource groups whose VMs the identity may manage. Empty grants Virtual Machine Contributor across the whole subscription instead - keep this list narrow, because that role includes installing extensions, which is code execution as SYSTEM or root on every VM in scope."
+      }
+    },
+    "targetSubscriptionIds": {
+      "type": "array",
+      "defaultValue": [],
+      "metadata": {
+        "description": "Subscriptions the runbook processes. Empty means the automation account's own subscription only."
+      }
+    },
+    "enableTagName": {
+      "type": "string",
+      "defaultValue": "CredentialRotation",
+      "metadata": {
+        "description": "VM tag that opts a machine in to rotation."
+      }
+    },
+    "enableTagValue": {
+      "type": "string",
+      "defaultValue": "enabled",
+      "metadata": {
+        "description": "Value that tag must carry."
+      }
+    },
+    "thresholdDays": {
+      "type": "int",
+      "defaultValue": 14,
+      "minValue": 1,
+      "maxValue": 3650,
+      "metadata": {
+        "description": "Rotate when a credential expires within this many days. Give it comfortable headroom over the schedule interval: a VM powered off for a few days keeps being retried, and a tight threshold means the secret expires before the machine comes back."
+      }
+    },
+    "validityDays": {
+      "type": "int",
+      "defaultValue": 90,
+      "minValue": 1,
+      "maxValue": 3650,
+      "metadata": {
+        "description": "Lifetime of a newly rotated credential, in days."
+      }
+    },
+    "scheduleIntervalHours": {
+      "type": "int",
+      "defaultValue": 6,
+      "minValue": 1,
+      "maxValue": 24,
+      "metadata": {
+        "description": "Hours between reconciliation runs. This is the upper bound on how long a credential marked for rotation waits."
+      }
+    },
+    "scheduleStartTime": {
+      "type": "string",
+      "defaultValue": "[dateTimeAdd(parameters('baseTime'), 'PT15M')]",
+      "metadata": {
+        "description": "First run, ISO 8601. Azure requires at least five minutes out; defaults to fifteen minutes from deployment."
+      }
+    },
+    "scheduleTimeZone": {
+      "type": "string",
+      "defaultValue": "Etc/UTC"
+    },
+    "dryRun": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Run the schedule under -WhatIf: report what would be rotated, change nothing. On by default. Read one run, then redeploy with this off."
+      }
+    },
+    "logVerbose": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Enable the verbose job stream. On by default - Automation drops the stream entirely when this is off, and verbose is the only stream the rotation logic can safely write to."
+      }
+    },
+    "deployObservability": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Deploy the workspace, custom table and diagnostic settings that record who read a credential and when it was replaced. Required for rotation after use."
+      }
+    },
+    "workspaceName": {
+      "type": "string",
+      "defaultValue": "log-credential-rotation"
+    },
+    "existingWorkspaceId": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Use this existing workspace instead of creating one. Resource ID; empty creates one. A borrowed workspace is assumed to already carry the CredentialRotation_CL table, and needs Log Analytics Reader granted to the identity separately."
+      }
+    },
+    "existingWorkspaceGuid": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "The GUID of that workspace - its customerId, not its resource ID. Required whenever existingWorkspaceId is set."
+      }
+    },
+    "retentionDays": {
+      "type": "int",
+      "defaultValue": 90,
+      "minValue": 30,
+      "maxValue": 730
+    },
+    "deployWorkbook": {
+      "type": "bool",
+      "defaultValue": true
+    },
+    "enableRotateOnAccess": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Turn on rotation after use: a read pulls the expiry date forward so the next pass replaces the credential. Needs deployObservability."
+      }
+    },
+    "gracePeriodHours": {
+      "type": "int",
+      "defaultValue": 8,
+      "minValue": 1,
+      "maxValue": 720,
+      "metadata": {
+        "description": "Hours a credential stays valid after somebody read it."
+      }
+    },
+    "accessLookbackHours": {
+      "type": "int",
+      "defaultValue": 0,
+      "minValue": 0,
+      "maxValue": 720,
+      "metadata": {
+        "description": "How far back each run looks for reads. Zero means twice the schedule interval, which is the safe default: a window shorter than the gap between runs drops reads silently."
+      }
+    },
+    "additionalExcludedObjectIds": {
+      "type": "array",
+      "defaultValue": [],
+      "metadata": {
+        "description": "Extra object IDs excluded from access detection. The automation identity is always excluded, so the tool cannot trigger itself."
+      }
+    },
+    "tags": {
+      "type": "object",
+      "defaultValue": {
+        "Project": "azure-vm-credential-rotation"
+      }
+    },
+    "baseTime": {
+      "type": "string",
+      "defaultValue": "[utcNow()]"
+    }
+  },
+  "variables": {
+    "effectiveModuleUri": "[if(empty(parameters('modulePackageUri')), format('https://www.powershellgallery.com/api/v2/package/CredentialRotation/{0}', parameters('moduleVersion')), parameters('modulePackageUri'))]",
+    "effectiveContentVersion": "[if(empty(parameters('contentVersion')), split(parameters('moduleVersion'), '-')[0], parameters('contentVersion'))]",
+    "effectiveLookbackHours": "[if(equals(parameters('accessLookbackHours'), 0), mul(parameters('scheduleIntervalHours'), 2), parameters('accessLookbackHours'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Resources/resourceGroups",
+      "apiVersion": "2024-03-01",
+      "name": "[parameters('resourceGroupName')]",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('tags')]"
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "automation",
+      "resourceGroup": "[parameters('resourceGroupName')]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "automationAccountName": {
+            "value": "[parameters('automationAccountName')]"
+          },
+          "tags": {
+            "value": "[parameters('tags')]"
+          },
+          "modulePackageUri": {
+            "value": "[variables('effectiveModuleUri')]"
+          },
+          "runbookContentUri": {
+            "value": "[parameters('runbookContentUri')]"
+          },
+          "contentVersion": {
+            "value": "[variables('effectiveContentVersion')]"
+          },
+          "keyVaultName": {
+            "value": "[parameters('keyVaultName')]"
+          },
+          "targetSubscriptionIds": {
+            "value": "[join(parameters('targetSubscriptionIds'), ',')]"
+          },
+          "thresholdDays": {
+            "value": "[parameters('thresholdDays')]"
+          },
+          "validityDays": {
+            "value": "[parameters('validityDays')]"
+          },
+          "enableTagName": {
+            "value": "[parameters('enableTagName')]"
+          },
+          "enableTagValue": {
+            "value": "[parameters('enableTagValue')]"
+          },
+          "scheduleIntervalHours": {
+            "value": "[parameters('scheduleIntervalHours')]"
+          },
+          "scheduleStartTime": {
+            "value": "[parameters('scheduleStartTime')]"
+          },
+          "scheduleTimeZone": {
+            "value": "[parameters('scheduleTimeZone')]"
+          },
+          "dryRun": {
+            "value": "[parameters('dryRun')]"
+          },
+          "logVerbose": {
+            "value": "[parameters('logVerbose')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.46.1.21595",
+              "templateHash": "9980942638602078565"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string"
+            },
+            "automationAccountName": {
+              "type": "string"
+            },
+            "tags": {
+              "type": "object"
+            },
+            "modulePackageUri": {
+              "type": "string",
+              "metadata": {
+                "description": "Where the CredentialRotation module package comes from. A PowerShell Gallery URL, or a GitHub release asset before the first Gallery release."
+              }
+            },
+            "runbookContentUri": {
+              "type": "string",
+              "metadata": {
+                "description": "Raw URL of the runbook wrapper. Pin it to a tag in production."
+              }
+            },
+            "contentVersion": {
+              "type": "string",
+              "metadata": {
+                "description": "Version stamp for the module package and runbook content. Change it to force a re-import of an unchanged URI."
+              }
+            },
+            "keyVaultName": {
+              "type": "string",
+              "metadata": {
+                "description": "Name of the existing Key Vault that stores the credentials. The runbook addresses the vault by name."
+              }
+            },
+            "targetSubscriptionIds": {
+              "type": "string",
+              "metadata": {
+                "description": "Subscriptions the runbook processes, comma-joined. Empty means the automation account's own subscription only."
+              }
+            },
+            "thresholdDays": {
+              "type": "int"
+            },
+            "validityDays": {
+              "type": "int"
+            },
+            "enableTagName": {
+              "type": "string"
+            },
+            "enableTagValue": {
+              "type": "string"
+            },
+            "scheduleIntervalHours": {
+              "type": "int"
+            },
+            "scheduleStartTime": {
+              "type": "string"
+            },
+            "scheduleTimeZone": {
+              "type": "string"
+            },
+            "dryRun": {
+              "type": "bool",
+              "metadata": {
+                "description": "Run the schedule under -WhatIf: report what would be rotated, change nothing. Deploy with this on, read one run, then turn it off."
+              }
+            },
+            "logVerbose": {
+              "type": "bool",
+              "metadata": {
+                "description": "Enable the verbose job stream. On by default, which is not the usual advice - Automation drops the stream entirely when this is off, and verbose is the only stream the rotation logic can write to that is both visible in the portal and safe inside a function that returns a value."
+              }
+            }
+          },
+          "variables": {
+            "coreSettings": {
+              "CR_VaultName": "[parameters('keyVaultName')]",
+              "CR_ThresholdDays": "[string(parameters('thresholdDays'))]",
+              "CR_ValidityDays": "[string(parameters('validityDays'))]",
+              "CR_EnableTagName": "[parameters('enableTagName')]",
+              "CR_EnableTagValue": "[parameters('enableTagValue')]",
+              "CR_AutomationAccountName": "[parameters('automationAccountName')]",
+              "CR_AutomationResourceGroup": "[resourceGroup().name]"
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Automation/automationAccounts",
+              "apiVersion": "2023-11-01",
+              "name": "[parameters('automationAccountName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "identity": {
+                "type": "SystemAssigned"
+              },
+              "properties": {
+                "sku": {
+                  "name": "Basic"
+                },
+                "publicNetworkAccess": true,
+                "disableLocalAuth": true
+              }
+            },
+            {
+              "type": "Microsoft.Automation/automationAccounts/powerShell72Modules",
+              "apiVersion": "2023-11-01",
+              "name": "[format('{0}/{1}', parameters('automationAccountName'), 'CredentialRotation')]",
+              "properties": {
+                "contentLink": {
+                  "uri": "[parameters('modulePackageUri')]",
+                  "version": "[parameters('contentVersion')]"
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Automation/automationAccounts', parameters('automationAccountName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Automation/automationAccounts/runbooks",
+              "apiVersion": "2023-11-01",
+              "name": "[format('{0}/{1}', parameters('automationAccountName'), 'Invoke-CredentialRotation')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "runbookType": "PowerShell72",
+                "logProgress": false,
+                "logVerbose": "[parameters('logVerbose')]",
+                "description": "Reconciles Azure VM credentials against their Key Vault expiry dates.",
+                "publishContentLink": {
+                  "uri": "[parameters('runbookContentUri')]",
+                  "version": "[parameters('contentVersion')]"
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Automation/automationAccounts', parameters('automationAccountName'))]",
+                "[resourceId('Microsoft.Automation/automationAccounts/powerShell72Modules', parameters('automationAccountName'), 'CredentialRotation')]"
+              ]
+            },
+            {
+              "type": "Microsoft.Automation/automationAccounts/schedules",
+              "apiVersion": "2023-11-01",
+              "name": "[format('{0}/{1}', parameters('automationAccountName'), format('Invoke-CredentialRotation-every-{0}h', parameters('scheduleIntervalHours')))]",
+              "properties": {
+                "description": "Reconciliation pass. Also the retry mechanism: anything skipped or failed is picked up next run.",
+                "frequency": "Hour",
+                "interval": "[parameters('scheduleIntervalHours')]",
+                "startTime": "[parameters('scheduleStartTime')]",
+                "timeZone": "[parameters('scheduleTimeZone')]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Automation/automationAccounts', parameters('automationAccountName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Automation/automationAccounts/jobSchedules",
+              "apiVersion": "2023-11-01",
+              "name": "[format('{0}/{1}', parameters('automationAccountName'), guid(resourceId('Microsoft.Automation/automationAccounts', parameters('automationAccountName')), 'rotation', 'Invoke-CredentialRotation'))]",
+              "properties": {
+                "schedule": {
+                  "name": "[format('Invoke-CredentialRotation-every-{0}h', parameters('scheduleIntervalHours'))]"
+                },
+                "runbook": {
+                  "name": "Invoke-CredentialRotation"
+                },
+                "parameters": {
+                  "dryrun": "[string(parameters('dryRun'))]"
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Automation/automationAccounts', parameters('automationAccountName'))]",
+                "[resourceId('Microsoft.Automation/automationAccounts/runbooks', parameters('automationAccountName'), 'Invoke-CredentialRotation')]",
+                "[resourceId('Microsoft.Automation/automationAccounts/schedules', parameters('automationAccountName'), format('Invoke-CredentialRotation-every-{0}h', parameters('scheduleIntervalHours')))]"
+              ]
+            },
+            {
+              "copy": {
+                "name": "coreVariables",
+                "count": "[length(items(variables('coreSettings')))]"
+              },
+              "type": "Microsoft.Automation/automationAccounts/variables",
+              "apiVersion": "2023-11-01",
+              "name": "[format('{0}/{1}', parameters('automationAccountName'), items(variables('coreSettings'))[copyIndex()].key)]",
+              "properties": {
+                "isEncrypted": false,
+                "value": "[format('\"{0}\"', items(variables('coreSettings'))[copyIndex()].value)]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Automation/automationAccounts', parameters('automationAccountName'))]"
+              ]
+            },
+            {
+              "condition": "[not(empty(parameters('targetSubscriptionIds')))]",
+              "type": "Microsoft.Automation/automationAccounts/variables",
+              "apiVersion": "2023-11-01",
+              "name": "[format('{0}/{1}', parameters('automationAccountName'), 'CR_SubscriptionId')]",
+              "properties": {
+                "isEncrypted": false,
+                "value": "[format('\"{0}\"', parameters('targetSubscriptionIds'))]",
+                "description": "Subscriptions the runbook processes. Absent means the automation account's own subscription only."
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Automation/automationAccounts', parameters('automationAccountName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.Automation/automationAccounts', parameters('automationAccountName'))]",
+              "name": "[guid(resourceId('Microsoft.Automation/automationAccounts', parameters('automationAccountName')), 'job-operator', '4fe576fe-1146-4730-92eb-48519fa6bf9f')]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4fe576fe-1146-4730-92eb-48519fa6bf9f')]",
+                "principalId": "[reference(resourceId('Microsoft.Automation/automationAccounts', parameters('automationAccountName')), '2023-11-01', 'full').identity.principalId]",
+                "principalType": "ServicePrincipal"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Automation/automationAccounts', parameters('automationAccountName'))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "principalId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Automation/automationAccounts', parameters('automationAccountName')), '2023-11-01', 'full').identity.principalId]"
+            },
+            "automationAccountId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Automation/automationAccounts', parameters('automationAccountName'))]"
+            },
+            "automationAccountName": {
+              "type": "string",
+              "value": "[parameters('automationAccountName')]"
+            },
+            "runbookName": {
+              "type": "string",
+              "value": "Invoke-CredentialRotation"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[subscriptionResourceId('Microsoft.Resources/resourceGroups', parameters('resourceGroupName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "role-key-vault",
+      "resourceGroup": "[parameters('keyVaultResourceGroupName')]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "keyVaultName": {
+            "value": "[parameters('keyVaultName')]"
+          },
+          "principalId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('resourceGroupName')), 'Microsoft.Resources/deployments', 'automation'), '2025-04-01').outputs.principalId.value]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.46.1.21595",
+              "templateHash": "8764328261919109875"
+            }
+          },
+          "parameters": {
+            "keyVaultName": {
+              "type": "string"
+            },
+            "principalId": {
+              "type": "string"
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]",
+              "name": "[guid(resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName')), parameters('principalId'), 'b86a8fe4-44ce-4948-aee5-eccb2c155cd7')]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b86a8fe4-44ce-4948-aee5-eccb2c155cd7')]",
+                "principalId": "[parameters('principalId')]",
+                "principalType": "ServicePrincipal"
+              }
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('resourceGroupName')), 'Microsoft.Resources/deployments', 'automation')]"
+      ]
+    },
+    {
+      "copy": {
+        "name": "vmRoleAtResourceGroup",
+        "count": "[length(parameters('targetResourceGroupNames'))]"
+      },
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "[format('role-vm-{0}', parameters('targetResourceGroupNames')[copyIndex()])]",
+      "resourceGroup": "[parameters('targetResourceGroupNames')[copyIndex()]]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "principalId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('resourceGroupName')), 'Microsoft.Resources/deployments', 'automation'), '2025-04-01').outputs.principalId.value]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.46.1.21595",
+              "templateHash": "15519951712538538799"
+            }
+          },
+          "parameters": {
+            "principalId": {
+              "type": "string"
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "name": "[guid(resourceGroup().id, parameters('principalId'), '9980e02c-c2be-4d73-94e8-173b1dc7cf3c')]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '9980e02c-c2be-4d73-94e8-173b1dc7cf3c')]",
+                "principalId": "[parameters('principalId')]",
+                "principalType": "ServicePrincipal"
+              }
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('resourceGroupName')), 'Microsoft.Resources/deployments', 'automation')]"
+      ]
+    },
+    {
+      "condition": "[empty(parameters('targetResourceGroupNames'))]",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "role-vm-subscription",
+      "location": "[deployment().location]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "principalId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('resourceGroupName')), 'Microsoft.Resources/deployments', 'automation'), '2025-04-01').outputs.principalId.value]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2018-05-01/subscriptionDeploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.46.1.21595",
+              "templateHash": "10987973347124933000"
+            }
+          },
+          "parameters": {
+            "principalId": {
+              "type": "string"
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "name": "[guid(subscription().id, parameters('principalId'), '9980e02c-c2be-4d73-94e8-173b1dc7cf3c')]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '9980e02c-c2be-4d73-94e8-173b1dc7cf3c')]",
+                "principalId": "[parameters('principalId')]",
+                "principalType": "ServicePrincipal"
+              }
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('resourceGroupName')), 'Microsoft.Resources/deployments', 'automation')]"
+      ]
+    },
+    {
+      "condition": "[parameters('deployObservability')]",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "observability",
+      "resourceGroup": "[parameters('resourceGroupName')]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "tags": {
+            "value": "[parameters('tags')]"
+          },
+          "workspaceName": {
+            "value": "[parameters('workspaceName')]"
+          },
+          "existingWorkspaceId": {
+            "value": "[parameters('existingWorkspaceId')]"
+          },
+          "existingWorkspaceGuid": {
+            "value": "[parameters('existingWorkspaceGuid')]"
+          },
+          "retentionDays": {
+            "value": "[parameters('retentionDays')]"
+          },
+          "automationAccountName": {
+            "value": "[parameters('automationAccountName')]"
+          },
+          "automationPrincipalId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('resourceGroupName')), 'Microsoft.Resources/deployments', 'automation'), '2025-04-01').outputs.principalId.value]"
+          },
+          "deployWorkbook": {
+            "value": "[parameters('deployWorkbook')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.46.1.21595",
+              "templateHash": "10797425317910446085"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string"
+            },
+            "tags": {
+              "type": "object"
+            },
+            "workspaceName": {
+              "type": "string",
+              "metadata": {
+                "description": "Create a workspace with this name. Ignored when existingWorkspaceId is set."
+              }
+            },
+            "existingWorkspaceId": {
+              "type": "string",
+              "metadata": {
+                "description": "Use this existing workspace instead of creating one. Resource ID; empty creates one."
+              }
+            },
+            "existingWorkspaceGuid": {
+              "type": "string",
+              "metadata": {
+                "description": "The GUID of that existing workspace - its customerId, not its resource ID. Required with existingWorkspaceId: the runbook queries by GUID, and reading it off a resource this template did not create would mean referencing a resource that may live in another resource group."
+              }
+            },
+            "retentionDays": {
+              "type": "int",
+              "minValue": 30,
+              "maxValue": 730
+            },
+            "automationAccountName": {
+              "type": "string"
+            },
+            "automationPrincipalId": {
+              "type": "string"
+            },
+            "deployWorkbook": {
+              "type": "bool"
+            }
+          },
+          "variables": {
+            "$fxv#0": "{\n  \"version\": \"Notebook/1.0\",\n  \"items\": [\n    {\n      \"type\": 1,\n      \"content\": {\n        \"json\": \"## Credential access and rotation\\n\\nWho read a credential, when it was replaced, and how long it stayed valid in between.\\n\\nReads come from the Key Vault audit log. Rotations come from the runbook. The exposure window is the gap between the two — that is the number this whole project exists to shrink.\"\n      },\n      \"name\": \"header\"\n    },\n    {\n      \"type\": 9,\n      \"content\": {\n        \"version\": \"KqlParameterItem/1.0\",\n        \"parameters\": [\n          {\n            \"id\": \"1b6cf4e0-3a2d-4c8f-9e11-7d5a2b8c4f60\",\n            \"version\": \"KqlParameterItem/1.0\",\n            \"name\": \"TimeRange\",\n            \"label\": \"Time range\",\n            \"type\": 4,\n            \"isRequired\": true,\n            \"value\": { \"durationMs\": 604800000 },\n            \"typeSettings\": {\n              \"selectableValues\": [\n                { \"durationMs\": 86400000 },\n                { \"durationMs\": 604800000 },\n                { \"durationMs\": 2592000000 },\n                { \"durationMs\": 7776000000 }\n              ]\n            }\n          }\n        ],\n        \"style\": \"pills\",\n        \"queryType\": 0,\n        \"resourceType\": \"microsoft.operationalinsights/workspaces\"\n      },\n      \"name\": \"parameters\"\n    },\n    {\n      \"type\": 1,\n      \"content\": {\n        \"json\": \"### Exposure windows\\n\\nEach row is one human read of a credential. `ExposureHours` is how long that credential stayed valid afterwards. Rows marked *not yet rotated* are still live — expected within the grace period, worth a look beyond it.\"\n      },\n      \"name\": \"exposure-header\"\n    },\n    {\n      \"type\": 3,\n      \"content\": {\n        \"version\": \"KqlItem/1.0\",\n        \"query\": \"let reads = AZKVAuditLogs\\n| where OperationName == 'SecretGet' and ResultType == 'Success'\\n| extend Upn = tostring(Identity.claim.upn)\\n| where isnotempty(Upn)\\n| extend SecretName = tostring(split(tostring(parse_url(RequestUri).Path), '/')[2])\\n| where isnotempty(SecretName) and SecretName !endswith '-pending'\\n| project ReadAt = TimeGenerated, SecretName, ReadBy = Upn;\\nlet rotations = CredentialRotation_CL\\n| where Result == 'Rotated'\\n| project RotatedAt = TimeGenerated, SecretName, VMName, TriggerReason;\\nreads\\n| join kind=leftouter rotations on SecretName\\n| where isnull(RotatedAt) or RotatedAt > ReadAt\\n| summarize RotatedAt = min(RotatedAt), VMName = any(VMName), TriggerReason = any(TriggerReason) by SecretName, ReadBy, ReadAt\\n| extend ExposureHours = round(toreal(datetime_diff('minute', coalesce(RotatedAt, now()), ReadAt)) / 60.0, 1)\\n| extend Status = iff(isnull(RotatedAt), 'not yet rotated', 'rotated')\\n| project ReadAt, SecretName, VMName, ReadBy, RotatedAt, ExposureHours, Status, TriggerReason\\n| order by ReadAt desc\",\n        \"size\": 0,\n        \"queryType\": 0,\n        \"resourceType\": \"microsoft.operationalinsights/workspaces\",\n        \"crossComponentResources\": [\"{workspaceId}\"],\n        \"visualization\": \"table\",\n        \"gridSettings\": {\n          \"formatters\": [\n            {\n              \"columnMatch\": \"ExposureHours\",\n              \"formatter\": 8,\n              \"formatOptions\": {\n                \"palette\": \"redGreen\",\n                \"compositeBarSettings\": { \"labelText\": \"\" }\n              }\n            },\n            {\n              \"columnMatch\": \"Status\",\n              \"formatter\": 18,\n              \"formatOptions\": {\n                \"thresholdsOptions\": \"icons\",\n                \"thresholdsGrid\": [\n                  { \"operator\": \"==\", \"thresholdValue\": \"not yet rotated\", \"representation\": \"pending\" },\n                  { \"operator\": \"Default\", \"representation\": \"success\" }\n                ]\n              }\n            }\n          ]\n        }\n      },\n      \"name\": \"exposure-windows\"\n    },\n    {\n      \"type\": 1,\n      \"content\": {\n        \"json\": \"### Rotation activity\"\n      },\n      \"name\": \"activity-header\"\n    },\n    {\n      \"type\": 3,\n      \"content\": {\n        \"version\": \"KqlItem/1.0\",\n        \"query\": \"CredentialRotation_CL\\n| summarize Count = count() by bin(TimeGenerated, 6h), Result\\n| order by TimeGenerated asc\",\n        \"size\": 1,\n        \"queryType\": 0,\n        \"resourceType\": \"microsoft.operationalinsights/workspaces\",\n        \"crossComponentResources\": [\"{workspaceId}\"],\n        \"visualization\": \"barchart\",\n        \"chartSettings\": { \"showLegend\": true }\n      },\n      \"customWidth\": \"50\",\n      \"name\": \"activity-chart\"\n    },\n    {\n      \"type\": 3,\n      \"content\": {\n        \"version\": \"KqlItem/1.0\",\n        \"query\": \"CredentialRotation_CL\\n| summarize Rotations = countif(Result == 'Rotated'), Skipped = countif(Result == 'Skipped'), Failed = countif(Result == 'Failed'), LastRun = max(TimeGenerated) by TriggerReason\\n| order by Rotations desc\",\n        \"size\": 1,\n        \"queryType\": 0,\n        \"resourceType\": \"microsoft.operationalinsights/workspaces\",\n        \"crossComponentResources\": [\"{workspaceId}\"],\n        \"visualization\": \"table\"\n      },\n      \"customWidth\": \"50\",\n      \"name\": \"activity-by-reason\"\n    },\n    {\n      \"type\": 1,\n      \"content\": {\n        \"json\": \"### Failures and machines that keep being skipped\\n\\nA VM that is powered off is skipped on purpose and retried next run. A VM that has been skipped for days is a VM whose credential is drifting towards its expiry date without anyone noticing.\"\n      },\n      \"name\": \"problems-header\"\n    },\n    {\n      \"type\": 3,\n      \"content\": {\n        \"version\": \"KqlItem/1.0\",\n        \"query\": \"CredentialRotation_CL\\n| where Result in ('Failed', 'Skipped')\\n| summarize Attempts = count(), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated), LastDetail = arg_max(TimeGenerated, Detail) by VMName, SecretName, CredentialType, Result\\n| extend StuckForHours = round(toreal(datetime_diff('minute', LastSeen, FirstSeen)) / 60.0, 1)\\n| project VMName, SecretName, CredentialType, Result, Attempts, StuckForHours, LastSeen, Detail = LastDetail_Detail\\n| order by StuckForHours desc, Attempts desc\",\n        \"size\": 0,\n        \"queryType\": 0,\n        \"resourceType\": \"microsoft.operationalinsights/workspaces\",\n        \"crossComponentResources\": [\"{workspaceId}\"],\n        \"visualization\": \"table\"\n      },\n      \"name\": \"problems\"\n    },\n    {\n      \"type\": 1,\n      \"content\": {\n        \"json\": \"### Every read, including applications\\n\\nThe rotation logic ignores reads without a upn claim, because rotating a credential out from under a running workload breaks it. They are still worth seeing: an application reading a VM administrator password is worth a question.\"\n      },\n      \"name\": \"all-reads-header\"\n    },\n    {\n      \"type\": 3,\n      \"content\": {\n        \"version\": \"KqlItem/1.0\",\n        \"query\": \"AZKVAuditLogs\\n| where OperationName == 'SecretGet'\\n| extend SecretName = tostring(split(tostring(parse_url(RequestUri).Path), '/')[2])\\n| extend Caller = coalesce(tostring(Identity.claim.upn), strcat('app:', tostring(Identity.claim.appid)))\\n| extend Kind = iff(isnotempty(tostring(Identity.claim.upn)), 'user', 'application')\\n| summarize Reads = count(), LastRead = max(TimeGenerated) by Caller, Kind, SecretName, CallerIPAddress, ResultType\\n| order by LastRead desc\",\n        \"size\": 0,\n        \"queryType\": 0,\n        \"resourceType\": \"microsoft.operationalinsights/workspaces\",\n        \"crossComponentResources\": [\"{workspaceId}\"],\n        \"visualization\": \"table\"\n      },\n      \"name\": \"all-reads\"\n    }\n  ],\n  \"fallbackResourceIds\": [\"{workspaceId}\"],\n  \"$schema\": \"https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json\"\n}\n",
+            "recordColumns": [
+              {
+                "name": "TimeGenerated",
+                "type": "datetime"
+              },
+              {
+                "name": "SecretName",
+                "type": "string"
+              },
+              {
+                "name": "VMName",
+                "type": "string"
+              },
+              {
+                "name": "ResourceGroupName",
+                "type": "string"
+              },
+              {
+                "name": "SubscriptionId",
+                "type": "string"
+              },
+              {
+                "name": "OSType",
+                "type": "string"
+              },
+              {
+                "name": "CredentialType",
+                "type": "string"
+              },
+              {
+                "name": "TriggerReason",
+                "type": "string"
+              },
+              {
+                "name": "TriggeredBy",
+                "type": "string"
+              },
+              {
+                "name": "Result",
+                "type": "string"
+              },
+              {
+                "name": "StartedAt",
+                "type": "datetime"
+              },
+              {
+                "name": "DurationMs",
+                "type": "int"
+              },
+              {
+                "name": "PreviousSecretVersion",
+                "type": "string"
+              },
+              {
+                "name": "NewSecretVersion",
+                "type": "string"
+              },
+              {
+                "name": "Detail",
+                "type": "string"
+              }
+            ],
+            "tableName": "CredentialRotation_CL",
+            "streamName": "Custom-CredentialRotation_CL",
+            "createWorkspace": "[empty(parameters('existingWorkspaceId'))]",
+            "workspaceResourceId": "[if(variables('createWorkspace'), resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName')), parameters('existingWorkspaceId'))]"
+          },
+          "resources": [
+            {
+              "condition": "[variables('createWorkspace')]",
+              "type": "Microsoft.OperationalInsights/workspaces",
+              "apiVersion": "2023-09-01",
+              "name": "[parameters('workspaceName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "sku": {
+                  "name": "PerGB2018"
+                },
+                "retentionInDays": "[parameters('retentionDays')]",
+                "features": {
+                  "enableLogAccessUsingOnlyResourcePermissions": true
+                }
+              }
+            },
+            {
+              "condition": "[variables('createWorkspace')]",
+              "type": "Microsoft.OperationalInsights/workspaces/tables",
+              "apiVersion": "2023-09-01",
+              "name": "[format('{0}/{1}', parameters('workspaceName'), variables('tableName'))]",
+              "properties": {
+                "plan": "Analytics",
+                "retentionInDays": "[parameters('retentionDays')]",
+                "schema": {
+                  "name": "[variables('tableName')]",
+                  "description": "One record per credential rotation attempt. Contains no credential material - only secret version identifiers.",
+                  "columns": "[variables('recordColumns')]"
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Insights/dataCollectionEndpoints",
+              "apiVersion": "2023-03-11",
+              "name": "[format('dce-{0}', parameters('automationAccountName'))]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "networkAcls": {
+                  "publicNetworkAccess": "Enabled"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.Insights/dataCollectionRules",
+              "apiVersion": "2023-03-11",
+              "name": "[format('dcr-{0}', parameters('automationAccountName'))]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "dataCollectionEndpointId": "[resourceId('Microsoft.Insights/dataCollectionEndpoints', format('dce-{0}', parameters('automationAccountName')))]",
+                "description": "[format('Routes credential rotation records into {0}.', variables('tableName'))]",
+                "streamDeclarations": {
+                  "Custom-CredentialRotation_CL": {
+                    "columns": "[variables('recordColumns')]"
+                  }
+                },
+                "destinations": {
+                  "logAnalytics": [
+                    {
+                      "name": "workspace",
+                      "workspaceResourceId": "[variables('workspaceResourceId')]"
+                    }
+                  ]
+                },
+                "dataFlows": [
+                  {
+                    "streams": [
+                      "[variables('streamName')]"
+                    ],
+                    "destinations": [
+                      "workspace"
+                    ],
+                    "transformKql": "source",
+                    "outputStream": "[variables('streamName')]"
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/dataCollectionEndpoints', format('dce-{0}', parameters('automationAccountName')))]",
+                "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName'))]",
+                "[resourceId('Microsoft.OperationalInsights/workspaces/tables', parameters('workspaceName'), variables('tableName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Insights/diagnosticSettings",
+              "apiVersion": "2021-05-01-preview",
+              "scope": "[resourceId('Microsoft.Automation/automationAccounts', parameters('automationAccountName'))]",
+              "name": "credential-rotation-jobs",
+              "properties": {
+                "workspaceId": "[variables('workspaceResourceId')]",
+                "logs": [
+                  {
+                    "category": "JobLogs",
+                    "enabled": true
+                  },
+                  {
+                    "category": "JobStreams",
+                    "enabled": true
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Automation/automationAccounts/variables",
+              "apiVersion": "2023-11-01",
+              "name": "[format('{0}/{1}', parameters('automationAccountName'), 'CR_WorkspaceId')]",
+              "properties": {
+                "isEncrypted": false,
+                "value": "[format('\"{0}\"', if(variables('createWorkspace'), reference(resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName')), '2023-09-01').customerId, parameters('existingWorkspaceGuid')))]",
+                "description": "Workspace GUID the runbook queries for credential reads."
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Automation/automationAccounts/variables",
+              "apiVersion": "2023-11-01",
+              "name": "[format('{0}/{1}', parameters('automationAccountName'), 'CR_DataCollectionEndpoint')]",
+              "properties": {
+                "isEncrypted": false,
+                "value": "[format('\"{0}\"', reference(resourceId('Microsoft.Insights/dataCollectionEndpoints', format('dce-{0}', parameters('automationAccountName'))), '2023-03-11').logsIngestion.endpoint)]",
+                "description": "Logs ingestion endpoint for CredentialRotation_CL."
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/dataCollectionEndpoints', format('dce-{0}', parameters('automationAccountName')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Automation/automationAccounts/variables",
+              "apiVersion": "2023-11-01",
+              "name": "[format('{0}/{1}', parameters('automationAccountName'), 'CR_DataCollectionRuleId')]",
+              "properties": {
+                "isEncrypted": false,
+                "value": "[format('\"{0}\"', reference(resourceId('Microsoft.Insights/dataCollectionRules', format('dcr-{0}', parameters('automationAccountName'))), '2023-03-11').immutableId)]",
+                "description": "Immutable id of the data collection rule that routes Custom-CredentialRotation_CL."
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/dataCollectionRules', format('dcr-{0}', parameters('automationAccountName')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Automation/automationAccounts/variables",
+              "apiVersion": "2023-11-01",
+              "name": "[format('{0}/{1}', parameters('automationAccountName'), 'CR_StreamName')]",
+              "properties": {
+                "isEncrypted": false,
+                "value": "[format('\"{0}\"', variables('streamName'))]",
+                "description": "Stream the runbook writes rotation records to."
+              }
+            },
+            {
+              "condition": "[variables('createWorkspace')]",
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName'))]",
+              "name": "[guid(resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName')), parameters('automationPrincipalId'), '73c42c96-874c-492b-b04d-ab87d138a893')]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '73c42c96-874c-492b-b04d-ab87d138a893')]",
+                "principalId": "[parameters('automationPrincipalId')]",
+                "principalType": "ServicePrincipal"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.Insights/dataCollectionRules', format('dcr-{0}', parameters('automationAccountName')))]",
+              "name": "[guid(resourceId('Microsoft.Insights/dataCollectionRules', format('dcr-{0}', parameters('automationAccountName'))), parameters('automationPrincipalId'), '3913510d-42f4-4e42-8a64-420c390055eb')]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '3913510d-42f4-4e42-8a64-420c390055eb')]",
+                "principalId": "[parameters('automationPrincipalId')]",
+                "principalType": "ServicePrincipal"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/dataCollectionRules', format('dcr-{0}', parameters('automationAccountName')))]"
+              ]
+            },
+            {
+              "condition": "[parameters('deployWorkbook')]",
+              "type": "Microsoft.Insights/workbooks",
+              "apiVersion": "2023-06-01",
+              "name": "[guid(variables('workspaceResourceId'), 'credential-rotation-workbook')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "kind": "shared",
+              "properties": {
+                "displayName": "Credential access and rotation",
+                "category": "workbook",
+                "sourceId": "[toLower(variables('workspaceResourceId'))]",
+                "version": "1.0",
+                "serializedData": "[replace(variables('$fxv#0'), '{workspaceId}', variables('workspaceResourceId'))]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName'))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "workspaceResourceId": {
+              "type": "string",
+              "value": "[variables('workspaceResourceId')]"
+            },
+            "logIngestionEndpoint": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Insights/dataCollectionEndpoints', format('dce-{0}', parameters('automationAccountName'))), '2023-03-11').logsIngestion.endpoint]"
+            },
+            "dataCollectionRuleId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Insights/dataCollectionRules', format('dcr-{0}', parameters('automationAccountName'))), '2023-03-11').immutableId]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('resourceGroupName')), 'Microsoft.Resources/deployments', 'automation')]",
+        "[subscriptionResourceId('Microsoft.Resources/resourceGroups', parameters('resourceGroupName'))]"
+      ]
+    },
+    {
+      "condition": "[parameters('deployObservability')]",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "key-vault-diagnostics",
+      "resourceGroup": "[parameters('keyVaultResourceGroupName')]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "keyVaultName": {
+            "value": "[parameters('keyVaultName')]"
+          },
+          "workspaceResourceId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('resourceGroupName')), 'Microsoft.Resources/deployments', 'observability'), '2025-04-01').outputs.workspaceResourceId.value]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.46.1.21595",
+              "templateHash": "6708265718112687279"
+            }
+          },
+          "parameters": {
+            "keyVaultName": {
+              "type": "string"
+            },
+            "workspaceResourceId": {
+              "type": "string"
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Insights/diagnosticSettings",
+              "apiVersion": "2021-05-01-preview",
+              "scope": "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]",
+              "name": "credential-rotation-audit",
+              "properties": {
+                "workspaceId": "[parameters('workspaceResourceId')]",
+                "logAnalyticsDestinationType": "Dedicated",
+                "logs": [
+                  {
+                    "category": "AuditEvent",
+                    "enabled": true
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('resourceGroupName')), 'Microsoft.Resources/deployments', 'observability')]"
+      ]
+    },
+    {
+      "condition": "[and(parameters('enableRotateOnAccess'), parameters('deployObservability'))]",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "rotate-on-access",
+      "resourceGroup": "[parameters('resourceGroupName')]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "automationAccountName": {
+            "value": "[parameters('automationAccountName')]"
+          },
+          "gracePeriodHours": {
+            "value": "[parameters('gracePeriodHours')]"
+          },
+          "accessLookbackHours": {
+            "value": "[variables('effectiveLookbackHours')]"
+          },
+          "excludedObjectIds": {
+            "value": "[join(union(createArray(reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('resourceGroupName')), 'Microsoft.Resources/deployments', 'automation'), '2025-04-01').outputs.principalId.value), parameters('additionalExcludedObjectIds')), ',')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.46.1.21595",
+              "templateHash": "8032347206436851900"
+            }
+          },
+          "parameters": {
+            "automationAccountName": {
+              "type": "string"
+            },
+            "gracePeriodHours": {
+              "type": "int",
+              "metadata": {
+                "description": "Hours a credential stays valid after somebody read it. The read moves the expiry date this far forward, and the next reconciliation pass replaces it."
+              }
+            },
+            "accessLookbackHours": {
+              "type": "int",
+              "metadata": {
+                "description": "How far back the run looks for reads. Must exceed the schedule interval, or reads that land between two runs are dropped silently - the worst kind of failure here, because nothing reports it. Main.bicep defaults it to twice the interval."
+              }
+            },
+            "excludedObjectIds": {
+              "type": "string",
+              "metadata": {
+                "description": "Object IDs excluded from access detection, comma-joined. The automation identity is always included by main.bicep, so the tool can never trigger itself."
+              }
+            }
+          },
+          "variables": {
+            "settings": {
+              "CR_AccessRotationEnabled": "true",
+              "CR_GracePeriodHours": "[string(parameters('gracePeriodHours'))]",
+              "CR_AccessLookbackHours": "[string(parameters('accessLookbackHours'))]",
+              "CR_ExcludeObjectId": "[parameters('excludedObjectIds')]"
+            }
+          },
+          "resources": [
+            {
+              "copy": {
+                "name": "variables",
+                "count": "[length(items(variables('settings')))]"
+              },
+              "type": "Microsoft.Automation/automationAccounts/variables",
+              "apiVersion": "2023-11-01",
+              "name": "[format('{0}/{1}', parameters('automationAccountName'), items(variables('settings'))[copyIndex()].key)]",
+              "properties": {
+                "isEncrypted": false,
+                "value": "[format('\"{0}\"', items(variables('settings'))[copyIndex()].value)]"
+              }
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('resourceGroupName')), 'Microsoft.Resources/deployments', 'automation')]",
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('resourceGroupName')), 'Microsoft.Resources/deployments', 'observability')]",
+        "[subscriptionResourceId('Microsoft.Resources/resourceGroups', parameters('resourceGroupName'))]"
+      ]
+    }
+  ],
+  "outputs": {
+    "automationAccountId": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('resourceGroupName')), 'Microsoft.Resources/deployments', 'automation'), '2025-04-01').outputs.automationAccountId.value]"
+    },
+    "automationAccountName": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('resourceGroupName')), 'Microsoft.Resources/deployments', 'automation'), '2025-04-01').outputs.automationAccountName.value]"
+    },
+    "principalId": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('resourceGroupName')), 'Microsoft.Resources/deployments', 'automation'), '2025-04-01').outputs.principalId.value]"
+    },
+    "runbookName": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('resourceGroupName')), 'Microsoft.Resources/deployments', 'automation'), '2025-04-01').outputs.runbookName.value]"
+    },
+    "resourceGroupName": {
+      "type": "string",
+      "value": "[parameters('resourceGroupName')]"
+    }
+  }
+}

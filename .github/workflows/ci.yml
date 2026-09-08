@@ -45,6 +45,10 @@ jobs:
           $config.Run.Exit = $true
           Invoke-Pester -Configuration $config
 
+      - name: Command reference is current
+        shell: pwsh
+        run: ./tools/New-CommandReference.ps1 -Check
+
       - name: Verify the deployable artefact matches the sources
         shell: pwsh
         # The runbook artefact is committed so Terraform can deploy without a build step. If someone
@@ -57,6 +61,28 @@ jobs:
         with:
           name: test-results
           path: TestResults.xml
+
+  bicep:
+    name: Bicep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # az bicep build is a full type and scope check, and it is what caught the cross-resource-group
+      # diagnostic setting and the for-loop over runtime values while this was being written.
+      - name: Build
+        run: az bicep build --file deploy/main.bicep --outfile /tmp/azuredeploy.json
+
+      # azuredeploy.json is committed so the deploy button has something to point at. If someone
+      # edits the Bicep and forgets to rebuild, the button deploys the old template.
+      - name: Committed ARM template matches the Bicep
+        run: |
+          if ! diff -q /tmp/azuredeploy.json deploy/azuredeploy.json > /dev/null; then
+            echo "deploy/azuredeploy.json is stale. Run: az bicep build --file deploy/main.bicep --outfile deploy/azuredeploy.json"
+            diff /tmp/azuredeploy.json deploy/azuredeploy.json | head -40
+            exit 1
+          fi
+          echo 'In step with the Bicep.'
 
   terraform:
     name: Terraform

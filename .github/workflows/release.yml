@@ -1,0 +1,73 @@
+name: Release
+
+# Publishes the module to the PowerShell Gallery when a version tag is pushed. The tag must match
+# the manifest version (v0.2.0 for ModuleVersion 0.2.0); the job refuses otherwise. Needs the
+# repository secret PSGALLERY_API_KEY.
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: Test and publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PowerShell modules
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          foreach ($m in 'PSScriptAnalyzer', 'Pester') { Install-Module $m -Force -Scope CurrentUser -SkipPublisherCheck }
+          foreach ($m in 'Az.Accounts', 'Az.Compute', 'Az.KeyVault', 'Az.OperationalInsights', 'Az.Resources') { Install-Module $m -Force -Scope CurrentUser }
+
+      - name: Tag must match the manifest version
+        id: manifest
+        shell: pwsh
+        run: |
+          $manifest = Test-ModuleManifest ./src/CredentialRotation/CredentialRotation.psd1
+          $tag = '${{ github.ref_name }}'.TrimStart('v')
+          if ($tag -ne $manifest.Version.ToString()) { throw "Tag $tag does not match ModuleVersion $($manifest.Version)." }
+          $prerelease = [string]$manifest.PrivateData.PSData.Prerelease
+          $fullVersion = if ($prerelease) { "$($manifest.Version)-$prerelease" } else { $manifest.Version.ToString() }
+          "prerelease=$([bool]$prerelease)".ToLowerInvariant() | Out-File $env:GITHUB_OUTPUT -Append
+          "full_version=$fullVersion" | Out-File $env:GITHUB_OUTPUT -Append
+          Write-Host "Releasing $($manifest.Name) $fullVersion"
+
+      - name: Analyze and test
+        shell: pwsh
+        run: |
+          $results = Invoke-ScriptAnalyzer -Path ./src -Recurse -Settings ./PSScriptAnalyzerSettings.psd1
+          if ($results) { $results | Format-Table -AutoSize; throw "PSScriptAnalyzer found $($results.Count) issue(s)." }
+          $config = New-PesterConfiguration
+          $config.Run.Path = './tests'
+          $config.Run.Exit = $true
+          Invoke-Pester -Configuration $config
+
+      - name: Package the module for the GitHub release
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path ./dist | Out-Null
+          Compress-Archive -Path ./src/CredentialRotation/* -DestinationPath ./dist/CredentialRotation.zip
+          Copy-Item ./src/runbooks/Invoke-CredentialRotationRunbook.ps1 ./dist/
+
+      - name: Publish to the PowerShell Gallery
+        shell: pwsh
+        env:
+          PSGALLERY_API_KEY: ${{ secrets.PSGALLERY_API_KEY }}
+        run: |
+          if (-not $env:PSGALLERY_API_KEY) { throw 'Secret PSGALLERY_API_KEY is not set.' }
+          Publish-Module -Path ./src/CredentialRotation -NuGetApiKey $env:PSGALLERY_API_KEY -Repository PSGallery -ErrorAction Stop
+
+      - name: GitHub release with the module zip and the runbook
+        uses: softprops/action-gh-release@v2
+        with:
+          name: CredentialRotation ${{ steps.manifest.outputs.full_version }}
+          prerelease: ${{ steps.manifest.outputs.prerelease == 'true' }}
+          files: |
+            dist/CredentialRotation.zip
+            dist/Invoke-CredentialRotationRunbook.ps1
+          generate_release_notes: true

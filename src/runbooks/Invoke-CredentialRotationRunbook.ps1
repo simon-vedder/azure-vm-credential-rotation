@@ -5,15 +5,19 @@
 .DESCRIPTION
     Thin wrapper. It authenticates, resolves configuration, guards against
     overlapping runs and calls Invoke-CredentialRotation. All logic lives in the
-    CredentialRotation module under src/, which is flattened into this file by
-    build/Build-Runbook.ps1 - Azure Automation runs a single script per job and
-    cannot import a module that is not published to a gallery.
+    CredentialRotation module under src/.
+
+    It reaches Azure Automation two ways. The Bicep deployment imports the module from
+    the PowerShell Gallery and publishes this file as it stands; the Terraform
+    deployment publishes the flattened artefact from build/Build-Runbook.ps1, which
+    inlines the module ahead of this wrapper. The import below covers the first case
+    and stays out of the way in the second.
 
     Configuration precedence is parameter, then Automation variable, then default.
-    That is what makes the Terraform modules independently deployable: the
-    observability module sets CR_WorkspaceId and the data collection variables, the
-    rotate-on-access module sets CR_AccessRotationEnabled. Deploy neither and the
-    runbook falls back to plain expiry-driven rotation.
+    That is what makes the optional parts independently deployable: observability sets
+    CR_WorkspaceId and the data collection variables, rotation-after-use sets
+    CR_AccessRotationEnabled. Deploy neither and the runbook falls back to plain
+    expiry-driven rotation.
 
 .PARAMETER DryRun
     Runs the whole pass under -WhatIf. Use this first, always.
@@ -88,6 +92,15 @@ function Get-RunbookSetting {
 
 # Keeps contexts from leaking between concurrent jobs in the same sandbox.
 $null = Disable-AzContextAutosave -Scope Process
+
+# Two ways this file reaches Automation, and it has to work for both. The Bicep deployment imports
+# the CredentialRotation module from the Gallery and publishes this wrapper as it stands, so the
+# module has to be imported here. The Terraform deployment publishes the flattened artefact from
+# build/Build-Runbook.ps1, which inlines every function ahead of this line - there the commands are
+# already defined and importing would pull a second, possibly older copy over them.
+if (-not (Get-Command -Name 'Invoke-CredentialRotation' -ErrorAction SilentlyContinue)) {
+    Import-Module -Name 'CredentialRotation' -ErrorAction Stop
+}
 
 Write-Verbose "$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss')) [Info] Connecting with the managed identity" -Verbose
 $null = Connect-AzAccount -Identity -ErrorAction Stop
