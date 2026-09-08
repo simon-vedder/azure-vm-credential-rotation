@@ -12,6 +12,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Terraform replaced the runbook on every apply.** The provider reads `runbook_type` back
+  as `PowerShell` for a runbook created as `PowerShell72`, so every plan wanted to replace
+  the runbook and, with it, the job schedule pointing at it - measured on azurerm 4.81.0
+  against a live account, where the ARM API returns `PowerShell72` at every api-version and
+  state holds `PowerShell`. The attribute is now ignored, which costs nothing because it is
+  hard-coded. Found by deploying the Terraform path live for the first time since 0.1.0.
+
 ### Added
 
 - `tests/manual/Test-HardeningDrift.ps1`, which answers a question the smoke tests do not:
