@@ -11,7 +11,6 @@
         'Az.Accounts'
         'Az.Compute'
         'Az.KeyVault'
-        'Az.OperationalInsights'
         'Az.Resources'
     )
 

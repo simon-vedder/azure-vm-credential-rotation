@@ -80,88 +80,6 @@ param(
 
 #region Private
 
-# --- Private/Get-AccessedSecret.ps1 ---------------------------------
-function Get-AccessedSecret {
-    <#
-    .SYNOPSIS
-        Returns secrets whose value was read by a human since a given point in time.
-
-    .DESCRIPTION
-        This is the whole access-triggered rotation mechanism. No Event Grid, no
-        alert rule, no webhook: the run asks Log Analytics who read what, and acts
-        on the answer.
-
-        "Human" is approximated by the presence of an upn claim. Service principals
-        and managed identities authenticate with an appid and no upn, so an
-        application reading its own secret does not trigger a rotation - which is
-        the desired behaviour, since rotating under a running workload breaks it.
-
-        Two caveats worth knowing before you rely on this:
-
-        - Log Analytics ingestion is not instant. Several minutes is normal. The
-          LookbackHours window should comfortably exceed the schedule interval so a
-          delayed record is never missed; overlapping windows are harmless because
-          bringing an expiry date forward is idempotent.
-
-        - Column names differ between the resource-specific table (AZKVAuditLogs)
-          and the legacy AzureDiagnostics table. This function targets the former,
-          which is what the observability module configures. Verify the query in
-          your own workspace before trusting it - see queries/accessed-secrets.kql.
-
-    .OUTPUTS
-        PSCustomObject with SecretName, LastAccessedAt, AccessedBy, AccessCount.
-    #>
-    [CmdletBinding()]
-    [OutputType([pscustomobject])]
-    param(
-        [Parameter(Mandatory)][string]$WorkspaceId,
-        [Parameter(Mandatory)][string]$VaultName,
-
-        [ValidateRange(1, 720)]
-        [int]$LookbackHours = 24,
-
-        # Object IDs never counted as human access, typically the automation
-        # account's own managed identity.
-        [string[]]$ExcludeObjectId = @()
-    )
-
-    $excludeClause = ''
-    if ($ExcludeObjectId.Count -gt 0) {
-        $list = ($ExcludeObjectId | ForEach-Object { "'$($_ -replace "'", '')'" }) -join ', '
-        $excludeClause = "| where tostring(Identity.claim.oid) !in ($list)"
-    }
-
-    $query = @"
-AZKVAuditLogs
-| where TimeGenerated > ago(${LookbackHours}h)
-| where OperationName == 'SecretGet'
-| where ResultType == 'Success'
-| where tolower(tostring(split(_ResourceId, '/')[-1])) == tolower('$VaultName')
-| extend Upn = tostring(Identity.claim.upn)
-| where isnotempty(Upn)
-$excludeClause
-| extend SecretName = tostring(split(tostring(parse_url(RequestUri).Path), '/')[2])
-| where isnotempty(SecretName)
-| summarize LastAccessedAt = max(TimeGenerated), AccessCount = count() by SecretName, Upn
-| project SecretName, LastAccessedAt, AccessedBy = Upn, AccessCount
-"@
-
-    Write-RotationLog -Message "Querying workspace for secret reads in the last $LookbackHours hours" -Level Info -Scope 'access'
-
-    $response = Invoke-AzOperationalInsightsQuery -WorkspaceId $WorkspaceId -Query $query -ErrorAction Stop
-
-    if (-not $response.Results) { return @() }
-
-    return @($response.Results | ForEach-Object {
-        [pscustomobject]@{
-            SecretName     = $_.SecretName
-            LastAccessedAt = [datetime]::Parse($_.LastAccessedAt).ToUniversalTime()
-            AccessedBy     = $_.AccessedBy
-            AccessCount    = [int]$_.AccessCount
-        }
-    })
-}
-
 # --- Private/Get-RotationSecret.ps1 ---------------------------------
 function Get-RotationSecret {
     <#
@@ -307,6 +225,56 @@ function Get-UniformChar {
     )
 
     return $Alphabet[[System.Security.Cryptography.RandomNumberGenerator]::GetInt32(0, $Alphabet.Length)]
+}
+
+# --- Private/New-RotationRecord.ps1 ---------------------------------
+function New-RotationRecord {
+    <#
+    .SYNOPSIS
+        Builds the record shape expected by the CredentialRotation_CL custom table.
+
+    .DESCRIPTION
+        TimeGenerated is set explicitly so the record carries the time the rotation
+        completed rather than the time the batch happened to flush.
+    #>
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][string]$SecretName,
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][string]$ResourceGroupName,
+        [Parameter(Mandatory)][string]$SubscriptionId,
+        [Parameter(Mandatory)][ValidateSet('Windows', 'Linux')][string]$OSType,
+        [Parameter(Mandatory)][ValidateSet('Password', 'SSHKey')][string]$CredentialType,
+        [Parameter(Mandatory)][ValidateSet('Expiry', 'Access', 'Missing', 'Manual', 'ResumePending')][string]$TriggerReason,
+        [Parameter(Mandatory)][ValidateSet('Rotated', 'Skipped', 'Failed', 'WhatIf')][string]$Result,
+
+        [datetime]$StartedAt = (Get-Date).ToUniversalTime(),
+        [string]$TriggeredBy,
+        [string]$PreviousSecretVersion,
+        [string]$NewSecretVersion,
+        [string]$Detail
+    )
+
+    $now = (Get-Date).ToUniversalTime()
+
+    return [pscustomobject]@{
+        TimeGenerated         = $now.ToString('o')
+        SecretName            = $SecretName
+        VMName                = $VMName
+        ResourceGroupName     = $ResourceGroupName
+        SubscriptionId        = $SubscriptionId
+        OSType                = $OSType
+        CredentialType        = $CredentialType
+        TriggerReason         = $TriggerReason
+        TriggeredBy           = $TriggeredBy
+        Result                = $Result
+        StartedAt             = $StartedAt.ToString('o')
+        DurationMs            = [int]($now - $StartedAt).TotalMilliseconds
+        PreviousSecretVersion = $PreviousSecretVersion
+        NewSecretVersion      = $NewSecretVersion
+        Detail                = $Detail
+    }
 }
 
 # --- Private/New-RotationSshKeyPair.ps1 -----------------------------
@@ -512,6 +480,12 @@ function Resolve-SecretName {
         ssh-priv - SSH private key, Linux
         ssh-pub  - SSH public key, Linux
         pending  - staged value written before the VM is updated, see Update-VMCredential
+
+    .PARAMETER Template
+        How the name is built, with {vm}, {user} and {kind} as placeholders. The default
+        is the shape this tool has always used. It has to contain {vm} and {kind}: without
+        the first every machine lands on the same secret, without the second a password
+        and an SSH key do. {user} is optional, for vaults that already key by machine.
     #>
     [CmdletBinding()]
     [OutputType([string])]
@@ -519,15 +493,27 @@ function Resolve-SecretName {
         [Parameter(Mandatory)][string]$VMName,
         [Parameter(Mandatory)][string]$AdminUsername,
         [Parameter(Mandatory)][ValidateSet('pw', 'ssh-priv', 'ssh-pub')][string]$Kind,
-        [switch]$Pending
+        [switch]$Pending,
+        [ValidateNotNullOrEmpty()][string]$Template = '{vm}-{user}-{kind}'
     )
+
+    foreach ($required in '{vm}', '{kind}') {
+        if ($Template -notlike "*$required*") {
+            throw "Secret name template '$Template' must contain $required, otherwise different credentials collide on one secret."
+        }
+    }
 
     $normalise = {
         param($value)
         ($value -replace '[^a-zA-Z0-9-]', '-') -replace '-+', '-'
     }
 
-    $name = '{0}-{1}-{2}' -f (& $normalise $VMName), (& $normalise $AdminUsername), $Kind
+    $name = $Template.
+        Replace('{vm}', (& $normalise $VMName)).
+        Replace('{user}', (& $normalise $AdminUsername)).
+        Replace('{kind}', $Kind)
+    # Literal characters in the template get the same treatment as the values.
+    $name = (& $normalise $name)
     if ($Pending) { $name += '-pending' }
     $name = $name.Trim('-')
 
@@ -695,104 +681,6 @@ function Write-RotationLog {
     }
 }
 
-# --- Private/Write-RotationRecord.ps1 -------------------------------
-function Write-RotationRecord {
-    <#
-    .SYNOPSIS
-        Writes one structured rotation record to a Log Analytics custom table.
-
-    .DESCRIPTION
-        Uses the Logs Ingestion API (data collection endpoint plus data collection
-        rule), not the HTTP Data Collector API. The latter retires on 14 September
-        2026 and would be dead on arrival.
-
-        The record never contains credential material. Secret versions are recorded
-        as identifiers so an auditor can correlate a rotation with the Key Vault
-        audit log without either system holding a value.
-
-        Failure to write a record is logged but does not fail the rotation. The
-        credential change already happened; losing the telemetry is the lesser
-        problem, and the job output still carries the same information.
-    #>
-    [CmdletBinding(SupportsShouldProcess)]
-    param(
-        [Parameter(Mandatory)][pscustomobject]$Record,
-
-        [Parameter(Mandatory)][string]$DataCollectionEndpoint,
-        [Parameter(Mandatory)][string]$DataCollectionRuleId,
-        [string]$StreamName = 'Custom-CredentialRotation_CL'
-    )
-
-    if (-not $PSCmdlet.ShouldProcess($StreamName, 'Write rotation record')) { return }
-
-    try {
-        $token = (Get-AzAccessToken -ResourceUrl 'https://monitor.azure.com' -ErrorAction Stop).Token
-        $uri = '{0}/dataCollectionRules/{1}/streams/{2}?api-version=2023-01-01' -f
-            $DataCollectionEndpoint.TrimEnd('/'), $DataCollectionRuleId, $StreamName
-
-        $body = ConvertTo-Json -InputObject @($Record) -Depth 5 -Compress
-
-        $null = Invoke-RestMethod -Uri $uri -Method Post -Body $body `
-            -ContentType 'application/json' `
-            -Headers @{ Authorization = "Bearer $token" } `
-            -ErrorAction Stop
-
-        Write-RotationLog -Message "Rotation record written for $($Record.SecretName)" -Level Info -Scope 'audit'
-    }
-    catch {
-        Write-RotationLog -Message "Could not write rotation record for $($Record.SecretName): $($_.Exception.Message)" -Level Warning -Scope 'audit'
-    }
-}
-
-function New-RotationRecord {
-    <#
-    .SYNOPSIS
-        Builds the record shape expected by the CredentialRotation_CL custom table.
-
-    .DESCRIPTION
-        TimeGenerated is set explicitly so the record carries the time the rotation
-        completed rather than the time the batch happened to flush.
-    #>
-    [CmdletBinding()]
-    [OutputType([pscustomobject])]
-    param(
-        [Parameter(Mandatory)][string]$SecretName,
-        [Parameter(Mandatory)][string]$VMName,
-        [Parameter(Mandatory)][string]$ResourceGroupName,
-        [Parameter(Mandatory)][string]$SubscriptionId,
-        [Parameter(Mandatory)][ValidateSet('Windows', 'Linux')][string]$OSType,
-        [Parameter(Mandatory)][ValidateSet('Password', 'SSHKey')][string]$CredentialType,
-        [Parameter(Mandatory)][ValidateSet('Expiry', 'Access', 'Missing', 'Manual', 'ResumePending')][string]$TriggerReason,
-        [Parameter(Mandatory)][ValidateSet('Rotated', 'Skipped', 'Failed', 'WhatIf')][string]$Result,
-
-        [datetime]$StartedAt = (Get-Date).ToUniversalTime(),
-        [string]$TriggeredBy,
-        [string]$PreviousSecretVersion,
-        [string]$NewSecretVersion,
-        [string]$Detail
-    )
-
-    $now = (Get-Date).ToUniversalTime()
-
-    return [pscustomobject]@{
-        TimeGenerated         = $now.ToString('o')
-        SecretName            = $SecretName
-        VMName                = $VMName
-        ResourceGroupName     = $ResourceGroupName
-        SubscriptionId        = $SubscriptionId
-        OSType                = $OSType
-        CredentialType        = $CredentialType
-        TriggerReason         = $TriggerReason
-        TriggeredBy           = $TriggeredBy
-        Result                = $Result
-        StartedAt             = $StartedAt.ToString('o')
-        DurationMs            = [int]($now - $StartedAt).TotalMilliseconds
-        PreviousSecretVersion = $PreviousSecretVersion
-        NewSecretVersion      = $NewSecretVersion
-        Detail                = $Detail
-    }
-}
-
 #endregion Private
 
 #region Public
@@ -831,6 +719,10 @@ function Get-RotationCandidate {
     .PARAMETER ThresholdDays
         How close to expiry counts as due. Only consulted with -OnlyIfDue.
 
+    .PARAMETER SecretNameTemplate
+        How secret names are built from {vm}, {user} and {kind}. Must match what was used
+        when the secrets were written, or nothing will be found.
+
         The last point is the design in one sentence: the expiry date is the only
         signal. Everything else writes to it.
 
@@ -850,7 +742,9 @@ function Get-RotationCandidate {
         [ValidateRange(0, 3650)][int]$ThresholdDays = 14,
 
         # Linux VMs get an SSH key rotated unless this is set.
-        [switch]$SkipSshKeys
+        [switch]$SkipSshKeys,
+
+        [ValidateNotNullOrEmpty()][string]$SecretNameTemplate = '{vm}-{user}-{kind}'
     )
 
     $candidates = [System.Collections.Generic.List[object]]::new()
@@ -884,8 +778,8 @@ function Get-RotationCandidate {
 
         foreach ($type in $types) {
             $kind = if ($type -eq 'Password') { 'pw' } else { 'ssh-priv' }
-            $secretName = Resolve-SecretName -VMName $vm.Name -AdminUsername $adminUsername -Kind $kind
-            $pendingName = Resolve-SecretName -VMName $vm.Name -AdminUsername $adminUsername -Kind $kind -Pending
+            $secretName = Resolve-SecretName -VMName $vm.Name -AdminUsername $adminUsername -Kind $kind -Template $SecretNameTemplate
+            $pendingName = Resolve-SecretName -VMName $vm.Name -AdminUsername $adminUsername -Kind $kind -Pending -Template $SecretNameTemplate
 
             $reason = $null
             $expiresOn = $null
@@ -989,6 +883,10 @@ function Invoke-CredentialRotation {
     .PARAMETER ThresholdDays
         How close to expiry counts as due. Only consulted with -OnlyIfDue.
 
+    .PARAMETER SecretNameTemplate
+        How secret names are built from {vm}, {user} and {kind}. Change it to fit a vault
+        that already has a naming convention; keep it the same for the life of a secret.
+
     .EXAMPLE
         Invoke-CredentialRotation -VaultName kv-creds -VMName jump-01 -WhatIf
 
@@ -1017,7 +915,8 @@ function Invoke-CredentialRotation {
         parameters.
 
     .OUTPUTS
-        PSCustomObject summarising the run, with the individual records attached.
+        PSCustomObject summarising the run. Records holds one entry per credential touched,
+        in the shape CredentialRotation_CL expects, for whoever wants to ship them.
     #>
     # -WhatIf is supported and propagated, but the decision is made where the change is:
     # Update-VMCredential calls ShouldProcess per credential. Confirming once up here
@@ -1048,10 +947,7 @@ function Invoke-CredentialRotation {
         [switch]$RemovePriorSshKeys,
         [switch]$ResetSshConfiguration,
 
-        # Structured audit records. Without these, the job output is the only trail.
-        [string]$DataCollectionEndpoint,
-        [string]$DataCollectionRuleId,
-        [string]$StreamName = 'Custom-CredentialRotation_CL',
+        [ValidateNotNullOrEmpty()][string]$SecretNameTemplate = '{vm}-{user}-{kind}',
 
         [string]$TriggeredBy
     )
@@ -1095,7 +991,8 @@ function Invoke-CredentialRotation {
     # --- what to rotate ------------------------------------------------------
     try {
         $candidates = Get-RotationCandidate -VaultName $VaultName -VM $machines `
-            -OnlyIfDue:$OnlyIfDue -ThresholdDays $ThresholdDays -SkipSshKeys:$SkipSshKeys
+            -OnlyIfDue:$OnlyIfDue -ThresholdDays $ThresholdDays -SkipSshKeys:$SkipSshKeys `
+            -SecretNameTemplate $SecretNameTemplate
     }
     catch {
         Write-RotationLog -Message "Could not work out what is due: $($_.Exception.Message)" -Level Error
@@ -1113,6 +1010,7 @@ function Invoke-CredentialRotation {
                 -TriggerReason $candidate.Reason -TriggeredBy $TriggeredBy `
                 -RemovePriorSshKeys:$RemovePriorSshKeys `
                 -ResetSshConfiguration:$ResetSshConfiguration `
+                -SecretNameTemplate $SecretNameTemplate `
                 -WhatIf:$WhatIfPreference -Confirm:$false
 
             $records.Add($record)
@@ -1127,16 +1025,6 @@ function Invoke-CredentialRotation {
         catch {
             Write-RotationLog -Message "Unhandled error on $($candidate.VM.Name) ($($candidate.CredentialType)): $($_.Exception.Message)" -Level Error -Scope $candidate.VM.Name
             $stats.Failed++
-        }
-    }
-
-    # --- 4. audit records ----------------------------------------------------
-    if ($DataCollectionEndpoint -and $DataCollectionRuleId -and $records.Count -gt 0) {
-        foreach ($record in $records) {
-            Write-RotationRecord -Record $record `
-                -DataCollectionEndpoint $DataCollectionEndpoint `
-                -DataCollectionRuleId $DataCollectionRuleId `
-                -StreamName $StreamName -Confirm:$false
         }
     }
 
@@ -1175,89 +1063,111 @@ function Register-CredentialAccess {
         Rather than schedule a delayed job, this writes the deadline where the system
         already looks: the secret's expiry date. Set it to now plus the grace period,
         and the next scheduled run treats it as any other near-expiry secret. No
-        timer, no queue, no orchestrator, no second code path to test.
+        timer, no queue, no second code path to test.
+
+        Who read what is the caller's finding, not this function's. It takes a secret
+        name and a reader and acts; the orchestrator gets those from the Key Vault
+        audit log in Log Analytics (queries/accessed-secrets.kql) and pipes them in.
+        That keeps the module free of any workspace dependency, and lets a different
+        orchestrator learn about reads however it likes.
 
         Changing an expiry date is an attribute update. It does not create a new
         secret version and it does not read the value, so it neither disturbs
         consumers nor pollutes the audit trail this function depends on.
+
+    .PARAMETER SecretName
+        The secret that was read. Accepts pipeline input by property name, so the
+        result of the audit-log query pipes straight in.
+
+    .PARAMETER AccessedBy
+        Who read it. Recorded on the secret so the audit trail can say.
+
+    .PARAMETER AccessedAt
+        When. Defaults to now; the query supplies LastAccessedAt, which is accepted.
 
     .PARAMETER GracePeriodHours
         How long the reader keeps working credentials. Eight hours covers a working
         day. Note that a password change does not end an established RDP session, but
         it does break reconnects, UAC elevation and anything that re-authenticates.
 
+    .EXAMPLE
+        Register-CredentialAccess -VaultName kv -SecretName vm01-azureuser-pw -AccessedBy alice@contoso.com
+
+    .EXAMPLE
+        $reads | Register-CredentialAccess -VaultName kv -GracePeriodHours 8 -WhatIf
+
+        Whatever produced $reads - the KQL in queries/, a SIEM export, a ticket - as
+        long as each object carries SecretName and AccessedBy.
+
     .OUTPUTS
-        PSCustomObject per secret whose expiry was moved.
+        PSCustomObject per secret, saying whether its expiry was moved.
     #>
     [CmdletBinding(SupportsShouldProcess)]
     [OutputType([pscustomobject])]
     param(
         [Parameter(Mandatory)][string]$VaultName,
-        [Parameter(Mandatory)][string]$WorkspaceId,
 
-        [ValidateRange(0, 168)][int]$GracePeriodHours = 8,
-        [ValidateRange(1, 720)][int]$LookbackHours = 24,
-        [string[]]$ExcludeObjectId = @()
+        [Parameter(Mandatory, ValueFromPipelineByPropertyName)]
+        [ValidateNotNullOrEmpty()][string]$SecretName,
+
+        [Parameter(Mandatory, ValueFromPipelineByPropertyName)]
+        [ValidateNotNullOrEmpty()][string]$AccessedBy,
+
+        [Parameter(ValueFromPipelineByPropertyName)]
+        [Alias('LastAccessedAt')]
+        [datetime]$AccessedAt = (Get-Date).ToUniversalTime(),
+
+        [ValidateRange(0, 168)][int]$GracePeriodHours = 8
     )
 
-    $accessed = Get-AccessedSecret -WorkspaceId $WorkspaceId -VaultName $VaultName `
-        -LookbackHours $LookbackHours -ExcludeObjectId $ExcludeObjectId
-
-    if ($accessed.Count -eq 0) {
-        Write-RotationLog -Message 'No human secret reads in the lookback window' -Level Info -Scope 'access'
-        return @()
+    begin {
+        $deadline = (Get-Date).ToUniversalTime().AddHours($GracePeriodHours)
     }
 
-    $now = (Get-Date).ToUniversalTime()
-    $deadline = $now.AddHours($GracePeriodHours)
-    $results = [System.Collections.Generic.List[object]]::new()
+    process {
+        $outcome = [pscustomobject]@{
+            SecretName = $SecretName
+            AccessedBy = $AccessedBy
+            NewExpiry  = $deadline
+            Applied    = $false
+        }
 
-    foreach ($entry in $accessed) {
         # Staging secrets are read by this tool itself during recovery; never treat
         # them as user access.
-        if ($entry.SecretName -like '*-pending') { continue }
+        if ($SecretName -like '*-pending') { return }
 
-        $meta = Get-RotationSecret -VaultName $VaultName -Name $entry.SecretName
-        if (-not $meta.Exists) { continue }
+        $meta = Get-RotationSecret -VaultName $VaultName -Name $SecretName
+        if (-not $meta.Exists) {
+            Write-RotationLog -Message "'$SecretName' was read but does not exist in the vault, nothing to move" -Level Info -Scope 'access'
+            return
+        }
 
         $currentExpiry = if ($meta.Secret.Expires) { $meta.Secret.Expires.ToUniversalTime() } else { $null }
 
         # Never push an expiry date further out than it already is.
         if ($currentExpiry -and $currentExpiry -le $deadline) {
-            Write-RotationLog -Message "'$($entry.SecretName)' already expires at $($currentExpiry.ToString('u')), no change" -Level Info -Scope 'access'
-            continue
+            Write-RotationLog -Message "'$SecretName' already expires at $($currentExpiry.ToString('u')), no change" -Level Info -Scope 'access'
+            return $outcome
         }
 
-        if (-not $PSCmdlet.ShouldProcess($entry.SecretName, "Bring expiry forward to $($deadline.ToString('u'))")) {
-            $results.Add([pscustomobject]@{
-                SecretName = $entry.SecretName
-                AccessedBy = $entry.AccessedBy
-                NewExpiry  = $deadline
-                Applied    = $false
-            })
-            continue
+        if (-not $PSCmdlet.ShouldProcess($SecretName, "Bring expiry forward to $($deadline.ToString('u'))")) {
+            return $outcome
         }
 
         $tags = @{}
         if ($meta.Secret.Tags) { $meta.Secret.Tags.GetEnumerator() | ForEach-Object { $tags[$_.Key] = $_.Value } }
-        $tags['LastAccessedBy'] = $entry.AccessedBy
-        $tags['LastAccessedAt'] = $entry.LastAccessedAt.ToString('o')
+        $tags['LastAccessedBy'] = $AccessedBy
+        $tags['LastAccessedAt'] = $AccessedAt.ToUniversalTime().ToString('o')
         $tags['RotationReason'] = 'Access'
 
-        $null = Update-AzKeyVaultSecret -VaultName $VaultName -Name $entry.SecretName `
+        $null = Update-AzKeyVaultSecret -VaultName $VaultName -Name $SecretName `
             -Expires $deadline -Tag $tags -ErrorAction Stop
 
-        Write-RotationLog -Message "'$($entry.SecretName)' was read by $($entry.AccessedBy), expiry moved to $($deadline.ToString('u'))" -Level Success -Scope 'access'
+        Write-RotationLog -Message "'$SecretName' was read by $AccessedBy, expiry moved to $($deadline.ToString('u'))" -Level Success -Scope 'access'
 
-        $results.Add([pscustomobject]@{
-            SecretName = $entry.SecretName
-            AccessedBy = $entry.AccessedBy
-            NewExpiry  = $deadline
-            Applied    = $true
-        })
+        $outcome.Applied = $true
+        return $outcome
     }
-
-    return $results.ToArray()
 }
 
 # --- Public/Update-VMCredential.ps1 ---------------------------------
@@ -1315,7 +1225,9 @@ function Update-VMCredential {
         [string]$TriggeredBy,
 
         [switch]$RemovePriorSshKeys,
-        [switch]$ResetSshConfiguration
+        [switch]$ResetSshConfiguration,
+
+        [ValidateNotNullOrEmpty()][string]$SecretNameTemplate = '{vm}-{user}-{kind}'
     )
 
     $startedAt = (Get-Date).ToUniversalTime()
@@ -1328,8 +1240,8 @@ function Update-VMCredential {
     }
 
     $kind = if ($CredentialType -eq 'Password') { 'pw' } else { 'ssh-priv' }
-    $secretName = Resolve-SecretName -VMName $VM.Name -AdminUsername $adminUsername -Kind $kind
-    $pendingName = Resolve-SecretName -VMName $VM.Name -AdminUsername $adminUsername -Kind $kind -Pending
+    $secretName = Resolve-SecretName -VMName $VM.Name -AdminUsername $adminUsername -Kind $kind -Template $SecretNameTemplate
+    $pendingName = Resolve-SecretName -VMName $VM.Name -AdminUsername $adminUsername -Kind $kind -Pending -Template $SecretNameTemplate
 
     $record = @{
         SecretName        = $secretName
@@ -1434,7 +1346,7 @@ function Update-VMCredential {
     # The public key is not secret, but keeping it beside the private key saves
     # anyone from having to derive it later.
     if ($CredentialType -eq 'SSHKey' -and $publicKey) {
-        $publicName = Resolve-SecretName -VMName $VM.Name -AdminUsername $adminUsername -Kind 'ssh-pub'
+        $publicName = Resolve-SecretName -VMName $VM.Name -AdminUsername $adminUsername -Kind 'ssh-pub' -Template $SecretNameTemplate
         $null = Set-AzKeyVaultSecret -VaultName $VaultName -Name $publicName `
             -SecretValue (ConvertTo-SecureString -String $publicKey -AsPlainText -Force) `
             -Expires (Get-Date).ToUniversalTime().AddDays($ValidityDays) `
@@ -1787,6 +1699,84 @@ if ($accountName -and $accountRg -and $PSPrivateMetadata.JobId) {
 # and from this runbook against a fleet.
 # ---------------------------------------------------------------------------
 
+function Get-AccessedSecret {
+    # Who read a credential, from the Key Vault audit log. This is the orchestrator's
+    # finding, not the module's: the module takes a secret name and a reader and acts.
+    # The same KQL lives in queries/accessed-secrets.kql for running by hand.
+    param(
+        [Parameter(Mandatory)][string]$WorkspaceId,
+        [Parameter(Mandatory)][string]$VaultName,
+        [int]$LookbackHours = 24,
+        [string[]]$ExcludeObjectId = @()
+    )
+
+    $excludeClause = ''
+    if ($ExcludeObjectId.Count -gt 0) {
+        $list = ($ExcludeObjectId | ForEach-Object { "'$($_ -replace "'", '')'" }) -join ', '
+        $excludeClause = "| where tostring(Identity.claim.oid) !in ($list)"
+    }
+
+    # AZKVAuditLogs is the resource-specific table; the diagnostic setting has to use
+    # the Dedicated destination type for it to exist. Only reads with a upn claim count -
+    # an application identity reading its own credential is not exposure.
+    $query = @"
+AZKVAuditLogs
+| where TimeGenerated > ago(${LookbackHours}h)
+| where OperationName == 'SecretGet'
+| where ResultType == 'Success'
+| where tolower(tostring(split(_ResourceId, '/')[-1])) == tolower('$VaultName')
+| extend Upn = tostring(Identity.claim.upn)
+| where isnotempty(Upn)
+$excludeClause
+| extend SecretName = tostring(split(tostring(parse_url(RequestUri).Path), '/')[2])
+| where isnotempty(SecretName)
+| summarize LastAccessedAt = max(TimeGenerated), AccessCount = count() by SecretName, Upn
+| project SecretName, LastAccessedAt, AccessedBy = Upn, AccessCount
+"@
+
+    $response = Invoke-AzOperationalInsightsQuery -WorkspaceId $WorkspaceId -Query $query -ErrorAction Stop
+    foreach ($row in @($response.Results)) {
+        [pscustomobject]@{
+            SecretName     = [string]$row.SecretName
+            LastAccessedAt = [datetime]$row.LastAccessedAt
+            AccessedBy     = [string]$row.AccessedBy
+            AccessCount    = [int]$row.AccessCount
+        }
+    }
+}
+
+function Write-RotationRecord {
+    # One structured record to the custom table, through the Logs Ingestion API (the
+    # HTTP Data Collector API retires on 14 September 2026). The module returns records;
+    # where they go is decided here, next to the infrastructure that receives them.
+    #
+    # Failure to write a record is a warning, not a failure: the credential change already
+    # happened, and the job output carries the same information.
+    param(
+        [Parameter(Mandatory, ValueFromPipeline)][pscustomobject]$Record,
+        [Parameter(Mandatory)][string]$DataCollectionEndpoint,
+        [Parameter(Mandatory)][string]$DataCollectionRuleId,
+        [string]$StreamName = 'Custom-CredentialRotation_CL'
+    )
+
+    process {
+        try {
+            $token = (Get-AzAccessToken -ResourceUrl 'https://monitor.azure.com' -ErrorAction Stop).Token
+            $uri = '{0}/dataCollectionRules/{1}/streams/{2}?api-version=2023-01-01' -f
+                $DataCollectionEndpoint.TrimEnd('/'), $DataCollectionRuleId, $StreamName
+            $body = ConvertTo-Json -InputObject @($Record) -Depth 5 -Compress
+
+            $null = Invoke-RestMethod -Uri $uri -Method Post -Body $body `
+                -ContentType 'application/json' `
+                -Headers @{ Authorization = "Bearer $token" } `
+                -ErrorAction Stop
+        }
+        catch {
+            Write-Warning "Could not write rotation record for $($Record.SecretName): $($_.Exception.Message)"
+        }
+    }
+}
+
 function Test-TagValue {
     # Azure tag keys are case-insensitive, and a tag typed in the portal as
     # "credentialrotation" must count. Hashtable lookup is not, so match on the key.
@@ -1805,16 +1795,19 @@ $totals = [ordered]@{ Candidates = 0; Rotated = 0; Skipped = 0; Failed = 0; Acce
 # the per-subscription passes below then see those credentials as ordinary ageing.
 if ($workspaceId) {
     try {
-        $accessParams = @{
-            VaultName        = $config.VaultName
-            WorkspaceId      = $workspaceId
-            GracePeriodHours = $optional['GracePeriodHours']
-            LookbackHours    = $optional['AccessLookbackHours']
+        $queryParams = @{
+            VaultName     = $config.VaultName
+            WorkspaceId   = $workspaceId
+            LookbackHours = $optional['AccessLookbackHours']
         }
-        if ($optional.ContainsKey('ExcludeObjectId')) { $accessParams['ExcludeObjectId'] = $optional['ExcludeObjectId'] }
+        if ($optional.ContainsKey('ExcludeObjectId')) { $queryParams['ExcludeObjectId'] = $optional['ExcludeObjectId'] }
 
-        $marked = Register-CredentialAccess @accessParams -WhatIf:$DryRun -Confirm:$false
-        $totals.AccessMarked = @($marked).Count
+        $reads = @(Get-AccessedSecret @queryParams)
+        Write-Verbose "$($reads.Count) secret(s) read by a person in the last $($optional['AccessLookbackHours']) h" -Verbose
+
+        $marked = @($reads | Register-CredentialAccess -VaultName $config.VaultName `
+                -GracePeriodHours $optional['GracePeriodHours'] -WhatIf:$DryRun -Confirm:$false)
+        $totals.AccessMarked = @($marked | Where-Object { $_.Applied }).Count
     }
     catch {
         # A workspace problem must not stop expiry-driven rotation.
@@ -1882,13 +1875,15 @@ foreach ($sub in $targetSubscriptions) {
         ResetSshConfiguration = $config.ResetSshConfiguration
         TriggeredBy           = 'automation'
     }
-    if ($optional.ContainsKey('DataCollectionEndpoint')) {
-        $params['DataCollectionEndpoint'] = $optional['DataCollectionEndpoint']
-        $params['DataCollectionRuleId'] = $optional['DataCollectionRuleId']
-        $params['StreamName'] = $optional['StreamName']
-    }
 
     $result = Invoke-CredentialRotation @params -WhatIf:$DryRun -Confirm:$false
+
+    # The module returned the records; this is where they go. Only when the observability
+    # deployment exists - without it the job output is the trail, which is fine.
+    if ($optional.ContainsKey('DataCollectionEndpoint') -and -not $DryRun -and @($result.Records).Count -gt 0) {
+        $result.Records | Write-RotationRecord -DataCollectionEndpoint $optional['DataCollectionEndpoint'] `
+            -DataCollectionRuleId $optional['DataCollectionRuleId'] -StreamName $optional['StreamName']
+    }
 
     $totals.Candidates += $result.Candidates
     $totals.Rotated += $result.Rotated

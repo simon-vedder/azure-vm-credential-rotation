@@ -31,7 +31,8 @@ What is left over is a real population: standalone Azure VMs, jump boxes, DMZ ho
 appliance images, test landing zones without identity integration, and **Linux SSH
 keys, for which Azure offers no native rotation at all**. That is the target.
 
-See [docs/when-not-to-use-this.md](docs/when-not-to-use-this.md) for the full
+See [KNOWN-ISSUES.md](KNOWN-ISSUES.md) for the sharp edges, and
+[docs/when-not-to-use-this.md](docs/when-not-to-use-this.md) for the full
 decision matrix.
 
 ---
@@ -99,8 +100,27 @@ identity holds those instead of you.
 
 What you do not get this way is the *loop*: the retry for a machine that was powered off,
 and rotation within hours of somebody reading a credential. Both need something running on
-a schedule. Rotation after use is `Register-CredentialAccess`, which pulls the expiry dates
-of credentials somebody read forward — the rotation then sees ordinary ageing.
+a schedule.
+
+Rotation after use is two commands from a workstation, because finding the reads is not the
+module's job: run the query in [`queries/accessed-secrets.kql`](queries/accessed-secrets.kql)
+against your workspace, pipe the result into `Register-CredentialAccess`, and the next rotation
+sees ordinary ageing.
+
+```powershell
+$reads = Invoke-AzOperationalInsightsQuery -WorkspaceId $ws -Query (Get-Content queries/accessed-secrets.kql -Raw)
+$reads.Results | Register-CredentialAccess -VaultName kv-creds -GracePeriodHours 8 -WhatIf
+```
+
+### What the module never does on its own
+
+It does not look for machines, does not look for reads, does not ship its records anywhere, and
+does not decide what secrets are called. Machines and reads arrive as arguments; records come
+back in `.Records`; the naming convention is `-SecretNameTemplate`, with `{vm}`, `{user}` and
+`{kind}` as placeholders and `{vm}-{user}-{kind}` as the default. That is what keeps the
+dependency list at four Az modules and lets an orchestrator that is not this runbook use it
+without pretending to be a Log Analytics workspace. [ADR 0008](docs/decisions/0008-the-module-holds-no-policy.md)
+and [ADR 0009](docs/decisions/0009-the-module-returns-facts.md) have the reasoning.
 
 ---
 
@@ -268,7 +288,8 @@ Confirmed working on a Linux VM (Ubuntu 24.04):
 - resume after an interrupted rotation, replaying a staged value from 25 minutes earlier
 - access-driven rotation: a human read detected in `AZKVAuditLogs`, expiry pulled
   forward, credential replaced on the following pass
-- rotation records reaching a custom table through the Logs Ingestion API, and the
+- rotation records reaching a custom table through the Logs Ingestion API (shipped by the
+  runbook from the records the module returns), and the
   workbook query correlating reads with rotations
 
 Still unverified, and worth knowing before you rely on them:

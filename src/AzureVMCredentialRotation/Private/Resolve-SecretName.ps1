@@ -14,6 +14,12 @@ function Resolve-SecretName {
         ssh-priv - SSH private key, Linux
         ssh-pub  - SSH public key, Linux
         pending  - staged value written before the VM is updated, see Update-VMCredential
+
+    .PARAMETER Template
+        How the name is built, with {vm}, {user} and {kind} as placeholders. The default
+        is the shape this tool has always used. It has to contain {vm} and {kind}: without
+        the first every machine lands on the same secret, without the second a password
+        and an SSH key do. {user} is optional, for vaults that already key by machine.
     #>
     [CmdletBinding()]
     [OutputType([string])]
@@ -21,15 +27,27 @@ function Resolve-SecretName {
         [Parameter(Mandatory)][string]$VMName,
         [Parameter(Mandatory)][string]$AdminUsername,
         [Parameter(Mandatory)][ValidateSet('pw', 'ssh-priv', 'ssh-pub')][string]$Kind,
-        [switch]$Pending
+        [switch]$Pending,
+        [ValidateNotNullOrEmpty()][string]$Template = '{vm}-{user}-{kind}'
     )
+
+    foreach ($required in '{vm}', '{kind}') {
+        if ($Template -notlike "*$required*") {
+            throw "Secret name template '$Template' must contain $required, otherwise different credentials collide on one secret."
+        }
+    }
 
     $normalise = {
         param($value)
         ($value -replace '[^a-zA-Z0-9-]', '-') -replace '-+', '-'
     }
 
-    $name = '{0}-{1}-{2}' -f (& $normalise $VMName), (& $normalise $AdminUsername), $Kind
+    $name = $Template.
+        Replace('{vm}', (& $normalise $VMName)).
+        Replace('{user}', (& $normalise $AdminUsername)).
+        Replace('{kind}', $Kind)
+    # Literal characters in the template get the same treatment as the values.
+    $name = (& $normalise $name)
     if ($Pending) { $name += '-pending' }
     $name = $name.Trim('-')
 

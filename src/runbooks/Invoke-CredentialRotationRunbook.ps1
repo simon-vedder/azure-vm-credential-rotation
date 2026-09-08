@@ -212,6 +212,84 @@ if ($accountName -and $accountRg -and $PSPrivateMetadata.JobId) {
 # and from this runbook against a fleet.
 # ---------------------------------------------------------------------------
 
+function Get-AccessedSecret {
+    # Who read a credential, from the Key Vault audit log. This is the orchestrator's
+    # finding, not the module's: the module takes a secret name and a reader and acts.
+    # The same KQL lives in queries/accessed-secrets.kql for running by hand.
+    param(
+        [Parameter(Mandatory)][string]$WorkspaceId,
+        [Parameter(Mandatory)][string]$VaultName,
+        [int]$LookbackHours = 24,
+        [string[]]$ExcludeObjectId = @()
+    )
+
+    $excludeClause = ''
+    if ($ExcludeObjectId.Count -gt 0) {
+        $list = ($ExcludeObjectId | ForEach-Object { "'$($_ -replace "'", '')'" }) -join ', '
+        $excludeClause = "| where tostring(Identity.claim.oid) !in ($list)"
+    }
+
+    # AZKVAuditLogs is the resource-specific table; the diagnostic setting has to use
+    # the Dedicated destination type for it to exist. Only reads with a upn claim count -
+    # an application identity reading its own credential is not exposure.
+    $query = @"
+AZKVAuditLogs
+| where TimeGenerated > ago(${LookbackHours}h)
+| where OperationName == 'SecretGet'
+| where ResultType == 'Success'
+| where tolower(tostring(split(_ResourceId, '/')[-1])) == tolower('$VaultName')
+| extend Upn = tostring(Identity.claim.upn)
+| where isnotempty(Upn)
+$excludeClause
+| extend SecretName = tostring(split(tostring(parse_url(RequestUri).Path), '/')[2])
+| where isnotempty(SecretName)
+| summarize LastAccessedAt = max(TimeGenerated), AccessCount = count() by SecretName, Upn
+| project SecretName, LastAccessedAt, AccessedBy = Upn, AccessCount
+"@
+
+    $response = Invoke-AzOperationalInsightsQuery -WorkspaceId $WorkspaceId -Query $query -ErrorAction Stop
+    foreach ($row in @($response.Results)) {
+        [pscustomobject]@{
+            SecretName     = [string]$row.SecretName
+            LastAccessedAt = [datetime]$row.LastAccessedAt
+            AccessedBy     = [string]$row.AccessedBy
+            AccessCount    = [int]$row.AccessCount
+        }
+    }
+}
+
+function Write-RotationRecord {
+    # One structured record to the custom table, through the Logs Ingestion API (the
+    # HTTP Data Collector API retires on 14 September 2026). The module returns records;
+    # where they go is decided here, next to the infrastructure that receives them.
+    #
+    # Failure to write a record is a warning, not a failure: the credential change already
+    # happened, and the job output carries the same information.
+    param(
+        [Parameter(Mandatory, ValueFromPipeline)][pscustomobject]$Record,
+        [Parameter(Mandatory)][string]$DataCollectionEndpoint,
+        [Parameter(Mandatory)][string]$DataCollectionRuleId,
+        [string]$StreamName = 'Custom-CredentialRotation_CL'
+    )
+
+    process {
+        try {
+            $token = (Get-AzAccessToken -ResourceUrl 'https://monitor.azure.com' -ErrorAction Stop).Token
+            $uri = '{0}/dataCollectionRules/{1}/streams/{2}?api-version=2023-01-01' -f
+                $DataCollectionEndpoint.TrimEnd('/'), $DataCollectionRuleId, $StreamName
+            $body = ConvertTo-Json -InputObject @($Record) -Depth 5 -Compress
+
+            $null = Invoke-RestMethod -Uri $uri -Method Post -Body $body `
+                -ContentType 'application/json' `
+                -Headers @{ Authorization = "Bearer $token" } `
+                -ErrorAction Stop
+        }
+        catch {
+            Write-Warning "Could not write rotation record for $($Record.SecretName): $($_.Exception.Message)"
+        }
+    }
+}
+
 function Test-TagValue {
     # Azure tag keys are case-insensitive, and a tag typed in the portal as
     # "credentialrotation" must count. Hashtable lookup is not, so match on the key.
@@ -230,16 +308,19 @@ $totals = [ordered]@{ Candidates = 0; Rotated = 0; Skipped = 0; Failed = 0; Acce
 # the per-subscription passes below then see those credentials as ordinary ageing.
 if ($workspaceId) {
     try {
-        $accessParams = @{
-            VaultName        = $config.VaultName
-            WorkspaceId      = $workspaceId
-            GracePeriodHours = $optional['GracePeriodHours']
-            LookbackHours    = $optional['AccessLookbackHours']
+        $queryParams = @{
+            VaultName     = $config.VaultName
+            WorkspaceId   = $workspaceId
+            LookbackHours = $optional['AccessLookbackHours']
         }
-        if ($optional.ContainsKey('ExcludeObjectId')) { $accessParams['ExcludeObjectId'] = $optional['ExcludeObjectId'] }
+        if ($optional.ContainsKey('ExcludeObjectId')) { $queryParams['ExcludeObjectId'] = $optional['ExcludeObjectId'] }
 
-        $marked = Register-CredentialAccess @accessParams -WhatIf:$DryRun -Confirm:$false
-        $totals.AccessMarked = @($marked).Count
+        $reads = @(Get-AccessedSecret @queryParams)
+        Write-Verbose "$($reads.Count) secret(s) read by a person in the last $($optional['AccessLookbackHours']) h" -Verbose
+
+        $marked = @($reads | Register-CredentialAccess -VaultName $config.VaultName `
+                -GracePeriodHours $optional['GracePeriodHours'] -WhatIf:$DryRun -Confirm:$false)
+        $totals.AccessMarked = @($marked | Where-Object { $_.Applied }).Count
     }
     catch {
         # A workspace problem must not stop expiry-driven rotation.
@@ -307,13 +388,15 @@ foreach ($sub in $targetSubscriptions) {
         ResetSshConfiguration = $config.ResetSshConfiguration
         TriggeredBy           = 'automation'
     }
-    if ($optional.ContainsKey('DataCollectionEndpoint')) {
-        $params['DataCollectionEndpoint'] = $optional['DataCollectionEndpoint']
-        $params['DataCollectionRuleId'] = $optional['DataCollectionRuleId']
-        $params['StreamName'] = $optional['StreamName']
-    }
 
     $result = Invoke-CredentialRotation @params -WhatIf:$DryRun -Confirm:$false
+
+    # The module returned the records; this is where they go. Only when the observability
+    # deployment exists - without it the job output is the trail, which is fine.
+    if ($optional.ContainsKey('DataCollectionEndpoint') -and -not $DryRun -and @($result.Records).Count -gt 0) {
+        $result.Records | Write-RotationRecord -DataCollectionEndpoint $optional['DataCollectionEndpoint'] `
+            -DataCollectionRuleId $optional['DataCollectionRuleId'] -StreamName $optional['StreamName']
+    }
 
     $totals.Candidates += $result.Candidates
     $totals.Rotated += $result.Rotated

@@ -10,6 +10,18 @@ uses, where the module never reads a tag and the runbook owns discovery.
 
 ### Breaking
 
+- **The module returns facts and takes findings; it neither looks for work nor ships
+  results.** Three more things left it, for the same reason the tags did:
+  - `Register-CredentialAccess` no longer queries Log Analytics. It takes `-SecretName`,
+    `-AccessedBy` and `-AccessedAt` — pipeline-capable, so the audit-log query pipes straight
+    in — and moves that one secret's expiry forward. Who read what is the orchestrator's
+    finding; the KQL now lives in the runbook and in `queries/accessed-secrets.kql`.
+  - `Invoke-CredentialRotation` no longer writes records to Log Analytics.
+    `-DataCollectionEndpoint`, `-DataCollectionRuleId` and `-StreamName` are gone; the
+    records it always returned in `.Records` are the whole interface, and the runbook
+    ships them to the table it deployed.
+  - `Az.OperationalInsights` is no longer a required module. A workstation rotating one
+    machine never needed it.
 - `Invoke-CredentialRotation` no longer discovers machines. It takes `-VMName` (one, by
   name) or `-VM` (machines the caller selected). The subscription loop, `-EnableTagName`,
   `-EnableTagValue` and `-HoldTagName` are gone.
@@ -29,12 +41,20 @@ uses, where the module never reads a tag and the runbook owns discovery.
 
 ### Added
 
+- `-SecretNameTemplate` on `Invoke-CredentialRotation`, `Get-RotationCandidate` and
+  `Update-VMCredential`, with `{vm}`, `{user}` and `{kind}` as placeholders and the shape
+  this tool has always used as the default. The naming convention was the last policy
+  decision hard-wired into the module; a vault with its own convention can now be used
+  as it is. A template without `{vm}` or `{kind}` is refused, because credentials would
+  collide on one secret.
 - The runbook wrapper is now the orchestrator: tag discovery, hold filtering, the
   subscription walk and the access scan all live there, and it passes `-OnlyIfDue` so a
   six-hourly job replaces what is due rather than everything it can see. It also refetches
   each selected machine in full, because the list form of `Get-AzVM` has no `OSProfile`.
 - A test asserting the scheduled pass asks for due credentials only, because the safe
   default moved out of the module and into the caller.
+- A guard, through the parser, that no module file calls `Invoke-AzOperationalInsightsQuery`,
+  `Invoke-RestMethod` or `Invoke-WebRequest` — and that the runbook does.
 - Two tests that assert the layering itself, through the PowerShell parser rather than a
   regex: the module never calls `Get-AzVM` without `-Name` or `-ResourceGroupName`, and no
   module file uses a tag variable. A third checks the runbook does both, so the behaviour

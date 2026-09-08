@@ -39,6 +39,10 @@ function Invoke-CredentialRotation {
     .PARAMETER ThresholdDays
         How close to expiry counts as due. Only consulted with -OnlyIfDue.
 
+    .PARAMETER SecretNameTemplate
+        How secret names are built from {vm}, {user} and {kind}. Change it to fit a vault
+        that already has a naming convention; keep it the same for the life of a secret.
+
     .EXAMPLE
         Invoke-CredentialRotation -VaultName kv-creds -VMName jump-01 -WhatIf
 
@@ -67,7 +71,8 @@ function Invoke-CredentialRotation {
         parameters.
 
     .OUTPUTS
-        PSCustomObject summarising the run, with the individual records attached.
+        PSCustomObject summarising the run. Records holds one entry per credential touched,
+        in the shape CredentialRotation_CL expects, for whoever wants to ship them.
     #>
     # -WhatIf is supported and propagated, but the decision is made where the change is:
     # Update-VMCredential calls ShouldProcess per credential. Confirming once up here
@@ -98,10 +103,7 @@ function Invoke-CredentialRotation {
         [switch]$RemovePriorSshKeys,
         [switch]$ResetSshConfiguration,
 
-        # Structured audit records. Without these, the job output is the only trail.
-        [string]$DataCollectionEndpoint,
-        [string]$DataCollectionRuleId,
-        [string]$StreamName = 'Custom-CredentialRotation_CL',
+        [ValidateNotNullOrEmpty()][string]$SecretNameTemplate = '{vm}-{user}-{kind}',
 
         [string]$TriggeredBy
     )
@@ -145,7 +147,8 @@ function Invoke-CredentialRotation {
     # --- what to rotate ------------------------------------------------------
     try {
         $candidates = Get-RotationCandidate -VaultName $VaultName -VM $machines `
-            -OnlyIfDue:$OnlyIfDue -ThresholdDays $ThresholdDays -SkipSshKeys:$SkipSshKeys
+            -OnlyIfDue:$OnlyIfDue -ThresholdDays $ThresholdDays -SkipSshKeys:$SkipSshKeys `
+            -SecretNameTemplate $SecretNameTemplate
     }
     catch {
         Write-RotationLog -Message "Could not work out what is due: $($_.Exception.Message)" -Level Error
@@ -163,6 +166,7 @@ function Invoke-CredentialRotation {
                 -TriggerReason $candidate.Reason -TriggeredBy $TriggeredBy `
                 -RemovePriorSshKeys:$RemovePriorSshKeys `
                 -ResetSshConfiguration:$ResetSshConfiguration `
+                -SecretNameTemplate $SecretNameTemplate `
                 -WhatIf:$WhatIfPreference -Confirm:$false
 
             $records.Add($record)
@@ -177,16 +181,6 @@ function Invoke-CredentialRotation {
         catch {
             Write-RotationLog -Message "Unhandled error on $($candidate.VM.Name) ($($candidate.CredentialType)): $($_.Exception.Message)" -Level Error -Scope $candidate.VM.Name
             $stats.Failed++
-        }
-    }
-
-    # --- 4. audit records ----------------------------------------------------
-    if ($DataCollectionEndpoint -and $DataCollectionRuleId -and $records.Count -gt 0) {
-        foreach ($record in $records) {
-            Write-RotationRecord -Record $record `
-                -DataCollectionEndpoint $DataCollectionEndpoint `
-                -DataCollectionRuleId $DataCollectionRuleId `
-                -StreamName $StreamName -Confirm:$false
         }
     }
 

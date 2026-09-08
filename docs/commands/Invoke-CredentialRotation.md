@@ -20,9 +20,9 @@ to look.
 ## Syntax
 
 ```powershell
-Invoke-CredentialRotation -VaultName <string> -VMName <string> [-ResourceGroupName <string>] [-OnlyIfDue] [-ThresholdDays <int>] [-ValidityDays <int>] [-SkipSshKeys] [-RemovePriorSshKeys] [-ResetSshConfiguration] [-DataCollectionEndpoint <string>] [-DataCollectionRuleId <string>] [-StreamName <string>] [-TriggeredBy <string>] [-WhatIf] [-Confirm] [<CommonParameters>]
+Invoke-CredentialRotation -VaultName <string> -VMName <string> [-ResourceGroupName <string>] [-OnlyIfDue] [-ThresholdDays <int>] [-ValidityDays <int>] [-SkipSshKeys] [-RemovePriorSshKeys] [-ResetSshConfiguration] [-SecretNameTemplate <string>] [-TriggeredBy <string>] [-WhatIf] [-Confirm] [<CommonParameters>]
 
-Invoke-CredentialRotation -VaultName <string> -VM <Object[]> [-OnlyIfDue] [-ThresholdDays <int>] [-ValidityDays <int>] [-SkipSshKeys] [-RemovePriorSshKeys] [-ResetSshConfiguration] [-DataCollectionEndpoint <string>] [-DataCollectionRuleId <string>] [-StreamName <string>] [-TriggeredBy <string>] [-WhatIf] [-Confirm] [<CommonParameters>]
+Invoke-CredentialRotation -VaultName <string> -VM <Object[]> [-OnlyIfDue] [-ThresholdDays <int>] [-ValidityDays <int>] [-SkipSshKeys] [-RemovePriorSshKeys] [-ResetSshConfiguration] [-SecretNameTemplate <string>] [-TriggeredBy <string>] [-WhatIf] [-Confirm] [<CommonParameters>]
 ```
 
 ## Parameters
@@ -39,9 +39,7 @@ Invoke-CredentialRotation -VaultName <string> -VM <Object[]> [-OnlyIfDue] [-Thre
 | `-SkipSshKeys` | SwitchParameter | no | no |  |  |
 | `-RemovePriorSshKeys` | SwitchParameter | no | no |  |  |
 | `-ResetSshConfiguration` | SwitchParameter | no | no |  |  |
-| `-DataCollectionEndpoint` | String | no | no |  | Structured audit records. Without these, the job output is the only trail. |
-| `-DataCollectionRuleId` | String | no | no |  |  |
-| `-StreamName` | String | no | no | Custom-CredentialRotation_CL |  |
+| `-SecretNameTemplate` | String | no | no | {vm}-{user}-{kind} | How secret names are built from {vm}, {user} and {kind}. Change it to fit a vault that already has a naming convention; keep it the same for the life of a secret. |
 | `-TriggeredBy` | String | no | no |  |  |
 
 Supports `-WhatIf` and `-Confirm`.
@@ -89,7 +87,8 @@ parameters.
 
 ## Output
 
-- PSCustomObject summarising the run, with the individual records attached.
+- PSCustomObject summarising the run. Records holds one entry per credential touched,
+in the shape CredentialRotation_CL expects, for whoever wants to ship them.
 
 -WhatIf is supported and propagated, but the decision is made where the change is:
 Update-VMCredential calls ShouldProcess per credential. Confirming once up here
