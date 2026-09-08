@@ -60,6 +60,21 @@ uses, where the module never reads a tag and the runbook owns discovery.
   module file uses a tag variable. A third checks the runbook does both, so the behaviour
   cannot pass by simply disappearing.
 
+- `deploy/lab.bicep`: one Windows and one Linux VM with password authentication on, no
+  public IP, and a Key Vault with RBAC, so every path the module has can be run against
+  real guests. `tests/manual/Invoke-LabSmokeTest.ps1` does exactly that from a workstation
+  and checks each rotation on the machine through Run Command;
+  `tests/manual/Invoke-OrchestratorSmokeTest.ps1` drives the deployed runbook through dry
+  run, live run, hold tag, audit-log detection and the custom table.
+
+### Fixed
+
+- The runbook's record writer accepts the token as either a string or a SecureString.
+  Az.Accounts 5 returns the latter, and the same wrapper is meant to work at a prompt as
+  well as in the sandbox's older module.
+- `docs/operations.md` still described a per-secret hold tag. That went with
+  `-HoldTagName` in this release; a hold is a statement about a machine.
+
 ### Unchanged
 
 - The 15 `CR_*` automation variables, so Bicep, Terraform and the deployment contract test

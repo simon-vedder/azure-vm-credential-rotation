@@ -87,3 +87,36 @@ the two drift apart. Rebuild it with:
 ```bash
 az bicep build --file deploy/main.bicep --outfile deploy/azuredeploy.json
 ```
+
+## Lab
+
+`lab.bicep` builds what the module needs to be verified against real guests: one Windows and one
+Linux VM (password authentication left on, so both credential kinds get exercised), no public IP,
+no inbound rule, and a Key Vault with RBAC authorisation that grants you Secrets Officer. Both
+machines carry the `CredentialRotation=enabled` tag, so a `main.bicep` deployment pointed at the
+lab resource group finds them.
+
+```bash
+az group create -n rg-crot-lab -l westeurope --tags Environment=lab Owner=simon CostCenter=lab Project=azure-vm-credential-rotation
+az deployment group create -g rg-crot-lab -f deploy/lab.bicep \
+  -p adminPassword="$(openssl rand -base64 30 | tr -dc 'A-Za-z0-9' | head -c 18)Xy9!" \
+     deployerObjectId="$(az ad signed-in-user show --query id -o tsv)"
+```
+
+The initial password is generated and forgotten on purpose: the first rotation replaces it, and
+from then on the vault is the only place it lives. `tests/manual/Invoke-LabSmokeTest.ps1` runs the
+module through every path against these two machines and checks each result on the guest through
+Run Command.
+
+Between sessions:
+
+```bash
+az vm deallocate -g rg-crot-lab --ids $(az vm list -g rg-crot-lab --query '[].id' -o tsv) --no-wait
+```
+
+When done — and purge the vault afterwards, or soft-delete keeps its name reserved:
+
+```bash
+az group delete -n rg-crot-lab --yes --no-wait
+az keyvault purge --name <keyVaultName>
+```
