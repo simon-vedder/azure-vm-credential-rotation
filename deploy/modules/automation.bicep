@@ -19,6 +19,9 @@ param runbookContentUri string
 @description('Version stamp for the module package and runbook content. Change it to force a re-import of an unchanged URI.')
 param contentVersion string
 
+@description('A value unique to this deployment, used to seed the job schedule id. See the note on that resource.')
+param deploymentStamp string
+
 @description('Name of the existing Key Vault that stores the credentials. The runbook addresses the vault by name.')
 param keyVaultName string
 
@@ -105,18 +108,26 @@ resource schedule 'Microsoft.Automation/automationAccounts/schedules@2023-11-01'
   }
 }
 
+// Two things about this resource were measured against a live account, and both shape it.
+//
+// The id carries a per-deployment stamp. Automation keeps job-schedule ids after the account is
+// deleted, so an id derived from names alone collides the moment the same names are deployed
+// again: "A jobSchedule with same id already exists", on an account with no job schedules at all.
+// A fresh id per deployment does not pile up links, because Automation treats a PUT for a
+// runbook-schedule pair that is already linked as a no-op.
+//
+// That same no-op is why there are no parameters here. A redeployment cannot change them - the
+// PUT reports success and the link keeps what it had - so dryRun is read from CR_DryRun instead,
+// which ARM updates reliably.
 resource jobSchedule 'Microsoft.Automation/automationAccounts/jobSchedules@2023-11-01' = {
   parent: automationAccount
-  name: guid(automationAccount.id, 'rotation', runbook.name)
+  name: guid(automationAccount.id, 'rotation', runbook.name, deploymentStamp)
   properties: {
     schedule: {
       name: schedule.name
     }
     runbook: {
       name: runbook.name
-    }
-    parameters: {
-      dryrun: string(dryRun)
     }
   }
 }
@@ -132,6 +143,8 @@ var coreSettings = {
   CR_EnableTagValue: enableTagValue
   CR_AutomationAccountName: automationAccountName
   CR_AutomationResourceGroup: resourceGroup().name
+  CR_AutomationSubscriptionId: subscription().subscriptionId
+  CR_DryRun: string(dryRun)
 }
 
 resource coreVariables 'Microsoft.Automation/automationAccounts/variables@2023-11-01' = [

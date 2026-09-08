@@ -46,10 +46,13 @@ param keyVaultResourceGroupName string
 // what it may touch
 // ---------------------------------------------------------------------------------------------
 
-@description('Resource groups whose VMs the identity may manage. Empty grants Virtual Machine Contributor across the whole subscription instead - keep this list narrow, because that role includes installing extensions, which is code execution as SYSTEM or root on every VM in scope.')
+@description('Resource groups in this subscription whose VMs the identity may manage, by name. Keep the list narrow: Virtual Machine Contributor includes installing extensions, which is code execution as SYSTEM or root on every VM in scope. With nothing named here, in targetResourceGroupIds or in targetSubscriptionIds, the identity gets the role across this whole subscription instead.')
 param targetResourceGroupNames array = []
 
-@description('Subscriptions the runbook processes. Empty means the automation account\'s own subscription only.')
+@description('Resource groups in any subscription of this tenant, as full resource IDs (/subscriptions/<id>/resourceGroups/<name>). The identity gets Virtual Machine Contributor on each, and the runbook walks every subscription named here. The deployer needs the right to assign roles there.')
+param targetResourceGroupIds array = []
+
+@description('Subscriptions the identity may manage as a whole: Virtual Machine Contributor at subscription scope on each, and the runbook walks them. Prefer targetResourceGroupIds; see the warning on targetResourceGroupNames.')
 param targetSubscriptionIds array = []
 
 @description('VM tag that opts a machine in to rotation.')
@@ -82,7 +85,7 @@ param scheduleStartTime string = dateTimeAdd(baseTime, 'PT15M')
 
 param scheduleTimeZone string = 'Etc/UTC'
 
-@description('Run the schedule under -WhatIf: report what would be rotated, change nothing. On by default. Read one run, then redeploy with this off.')
+@description('Run the schedule under -WhatIf: report what would be rotated, change nothing. On by default. Read one run, then redeploy with this off - or flip the CR_DryRun variable on the account, which is where this lands.')
 param dryRun bool = true
 
 @description('Enable the verbose job stream. On by default - Automation drops the stream entirely when this is off, and verbose is the only stream the rotation logic can safely write to.')
@@ -147,6 +150,21 @@ var effectiveContentVersion = empty(contentVersion) ? split(moduleVersion, '-')[
 // nothing reports it. Twice the interval is the documented starting point.
 var effectiveLookbackHours = accessLookbackHours == 0 ? scheduleIntervalHours * 2 : accessLookbackHours
 
+// Where the VMs are. Resource IDs split into subscription and name so the role can be assigned
+// where each group lives; the runbook then walks every subscription mentioned anywhere, plus this
+// one if any of its groups are named. Nothing named at all means this subscription, all of it -
+// the runbook falls back to its own subscription when the variable is absent.
+var resourceGroupTargets = map(targetResourceGroupIds, id => {
+  subscriptionId: split(id, '/')[2]
+  name: split(id, '/')[4]
+})
+var walkedSubscriptionIds = union(
+  targetSubscriptionIds,
+  map(resourceGroupTargets, t => t.subscriptionId),
+  empty(targetResourceGroupNames) ? [] : [subscription().subscriptionId]
+)
+var nothingNamed = empty(targetResourceGroupNames) && empty(targetResourceGroupIds) && empty(targetSubscriptionIds)
+
 resource resourceGroup 'Microsoft.Resources/resourceGroups@2024-03-01' = {
   name: resourceGroupName
   location: location
@@ -163,8 +181,9 @@ module automation 'modules/automation.bicep' = {
     modulePackageUri: effectiveModuleUri
     runbookContentUri: runbookContentUri
     contentVersion: effectiveContentVersion
+    deploymentStamp: baseTime
     keyVaultName: keyVaultName
-    targetSubscriptionIds: join(targetSubscriptionIds, ',')
+    targetSubscriptionIds: join(walkedSubscriptionIds, ',')
     thresholdDays: thresholdDays
     validityDays: validityDays
     enableTagName: enableTagName
@@ -196,7 +215,30 @@ module vmRoleAtResourceGroup 'modules/role-assignment-resourcegroup.bicep' = [
   }
 ]
 
-module vmRoleAtSubscription 'modules/role-assignment-subscription.bicep' = if (empty(targetResourceGroupNames)) {
+// Groups in other subscriptions. A module can be scoped to a resource group in any subscription of
+// the tenant; the deployer has to hold a role there that allows assigning roles.
+module vmRoleAtResourceGroupElsewhere 'modules/role-assignment-resourcegroup.bicep' = [
+  for target in resourceGroupTargets: {
+    name: 'role-vm-${uniqueString(target.subscriptionId, target.name)}'
+    scope: az.resourceGroup(target.subscriptionId, target.name)
+    params: {
+      principalId: automation.outputs.principalId
+    }
+  }
+]
+
+// Whole subscriptions, this one included if it is listed.
+module vmRoleAtListedSubscription 'modules/role-assignment-subscription.bicep' = [
+  for id in targetSubscriptionIds: {
+    name: 'role-vm-sub-${uniqueString(id)}'
+    scope: subscription(id)
+    params: {
+      principalId: automation.outputs.principalId
+    }
+  }
+]
+
+module vmRoleAtSubscription 'modules/role-assignment-subscription.bicep' = if (nothingNamed) {
   name: 'role-vm-subscription'
   params: {
     principalId: automation.outputs.principalId

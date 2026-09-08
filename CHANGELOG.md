@@ -1,5 +1,48 @@
 # Changelog
 
+## [Unreleased]
+
+Deployment and lab only; the module on the Gallery is unchanged at 0.3.0.
+
+### Added
+
+- **Machines in other subscriptions.** `deploy/main.bicep` takes `targetResourceGroupIds`
+  (resource groups anywhere in the tenant, by resource ID) next to `targetResourceGroupNames`
+  (this subscription, by name), and assigns Virtual Machine Contributor where each group
+  lives. `targetSubscriptionIds` now grants the role at subscription scope on each listed
+  subscription instead of only telling the runbook to walk it - which is what it did before,
+  leaving the identity without a role there. The runbook walks every subscription mentioned
+  in either list, plus this one if any of its groups are named.
+- `deploy/lab.bicep` builds variations: a second lab in another subscription
+  (`deployKeyVault=false`, `deployWindowsVm=false`, `nameSuffix`), and marketplace images
+  with a plan, for CIS hardened guests.
+- `tests/manual/Invoke-OrchestratorSmokeTest.ps1` gained a step that proves the second
+  subscription is walked and its machine rotated. `tests/manual/Invoke-RenamedAccountProbe.ps1`
+  measures what a rotation does when the OS-profile account was renamed inside the guest.
+
+### Fixed
+
+- **Redeploying with `dryRun=false` now takes effect.** Automation ignores a PUT on a job
+  schedule whose runbook and schedule are already linked: the deployment reported success
+  and the link kept `DryRun=True`. The setting moved into the automation variable
+  `CR_DryRun`, which ARM updates reliably; the link itself carries no parameters. The
+  runbook reads the variable when `-DryRun` is not passed explicitly.
+- **The runbook pins its context to its own subscription.** With roles in a second
+  subscription, `Connect-AzAccount -Identity` chose that one, the concurrent-job check
+  looked for the automation account in the wrong place, and two jobs ran side by side. The
+  new `CR_AutomationSubscriptionId` variable says where home is; older deployments without
+  it are searched for. Seventeen `CR_*` variables.
+- A deployment into an account that was deleted and recreated under the same names failed
+  with `A jobSchedule with same id already exists`, because Automation keeps job-schedule
+  ids beyond the account's life. The id is seeded with a per-deployment stamp.
+
+### Changed
+
+- The README's scale note names the real limit: sequential rotations against a three-hour
+  job, not ARM throttling.
+- Bicep is stated as the verified deployment path; Terraform stays, CI-validated, last
+  deployed live with 0.1.0 (note in ADR 0007).
+
 ## [0.3.0] — 2026-09-08
 
 **Breaking.** The module no longer selects machines. It rotates the machines it is given

@@ -209,7 +209,10 @@ Worth knowing before you run it, not after:
 
 - **Credentials are applied with the VMAccess extension.** If the account named in
   the VM's OS profile no longer exists on the machine, VMAccess **recreates it as a
-  local administrator**. Someone may have removed that account deliberately.
+  local administrator**. Someone may have removed that account deliberately. Measured:
+  on Windows a renamed account leads to a second administrator and a rotation that
+  reports success; on Linux the rotation fails and touches nothing. See
+  [KNOWN-ISSUES](KNOWN-ISSUES.md#the-account-was-renamed-inside-the-guest).
 - **`remove_prior_keys` and `reset_ssh` default to off**, unlike most examples you
   will find. The first wipes every entry in `authorized_keys` — colleagues,
   configuration management, backup agents. The second can restore `sshd_config` to
@@ -312,8 +315,14 @@ Through the deployed runbook (`Invoke-OrchestratorSmokeTest.ps1`):
 Still unverified, and worth knowing before you rely on them:
 
 - **Hardened images.** VMAccess behaviour against a CIS-baselined host is untested.
-- **Scale.** Tested with two VMs. Discovery reads secret metadata per credential, so several
-  hundred machines is where ARM throttling would first show up.
+- **Scale.** Tested with a handful of VMs. The limit is not ARM throttling - a run makes five
+  to seven calls per tagged machine, far below the token-bucket limits - but throughput:
+  rotations run one after another, each VMAccess round trip took 30 to 60 seconds in the lab,
+  and Automation unloads a job after three hours. Call it 150 to 250 rotations per job. In
+  steady state that is plenty (2,000 machines on a 90-day validity need about 22 a day); the
+  one wave that exceeds it is the first onboarding of a large fleet, when every credential is
+  missing at once. Tag in batches and let the schedule catch up - whatever a job does not
+  reach is picked up by the next one.
 - **Multi-subscription.** Single subscription only so far.
 - **Terraform.** The Bicep path is the one exercised live with 0.3.0. The Terraform modules
   deploy the same runbook from the committed build artefact and are validated in CI; their

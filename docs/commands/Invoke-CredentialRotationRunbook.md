@@ -56,7 +56,7 @@ Requires the automation account's managed identity to hold:
 | `-SkipSshKeys` | Boolean | no | no |  |  |
 | `-RemovePriorSshKeys` | Boolean | no | no |  |  |
 | `-ResetSshConfiguration` | Boolean | no | no |  |  |
-| `-DryRun` | Boolean | no | no |  | Runs the whole pass under -WhatIf. Use this first, always. |
+| `-DryRun` | Boolean | no | no |  | Runs the whole pass under -WhatIf. Use this first, always. Passed explicitly for a manual run; the scheduled job leaves it to the automation variable CR_DryRun, which is what the deployment's dryRun setting writes. It lives in a variable rather than in the job schedule's parameters because Automation ignores a PUT on a schedule link that already exists - a redeployment with dryRun=false would report success and change nothing. |
 
 ## Examples
 

@@ -5,8 +5,10 @@ with a system-assigned identity, the `AzureVMCredentialRotation` module imported
 Gallery, the runbook and its schedule, the roles the identity needs, and — unless you turn them off
 — the audit trail and rotation after use.
 
-For the Terraform path, see [`../infra`](../infra). The two are equivalent and share one contract:
-the `CR_*` automation variables the runbook reads. [ADR 0007](../docs/decisions/0007-bicep-beside-terraform.md)
+This is the path the project verifies live on every release. The Terraform modules under
+[`../infra`](../infra) stay for teams that already run Terraform; they write the same `CR_*`
+automation variables the runbook reads, and a test holds the two sets together, but they are
+validated in CI rather than deployed live. [ADR 0007](../docs/decisions/0007-bicep-beside-terraform.md)
 says why both exist.
 
 ## Before you start
@@ -35,9 +37,27 @@ That gives you expiry-driven rotation with the audit trail, **in dry-run mode**:
 run reports what it would replace and changes nothing. That is the default on purpose. Read one
 run's output, then redeploy with `dryRun=false`.
 
-Leave `targetResourceGroupNames` empty and the identity gets Virtual Machine Contributor across the
-whole subscription instead. Think before you do: that role includes installing extensions, which is
-code execution as SYSTEM or root on every VM in scope.
+Name nothing - no resource groups, no subscriptions - and the identity gets Virtual Machine
+Contributor across the whole subscription instead. Think before you do: that role includes
+installing extensions, which is code execution as SYSTEM or root on every VM in scope.
+
+## Machines in other subscriptions
+
+The runbook walks every subscription it is told about, and the deployment assigns the role where
+the machines are. Name resource groups elsewhere by resource ID, or whole subscriptions by ID:
+
+```bash
+az deployment sub create \
+  ... \
+  --parameters targetResourceGroupNames='["rg-workloads"]' \
+               targetResourceGroupIds='["/subscriptions/<other-id>/resourceGroups/rg-dmz"]'
+```
+
+Every subscription mentioned in either list is walked, plus this one if any of its groups are
+named. The deployer needs the right to assign roles in the other subscription - Owner or User
+Access Administrator there - or the deployment fails on that module. The Key Vault stays in this
+subscription; a vault is addressed by name, not by subscription, so the runbook reaches it from
+anywhere in the tenant.
 
 ## Turning on rotation after use
 
@@ -60,7 +80,7 @@ nothing reports it.
 | Runbook | `Invoke-CredentialRotation`, PowerShell 7.2 runtime |
 | Schedule | every `scheduleIntervalHours`, default 6 |
 | Module | `AzureVMCredentialRotation` from the Gallery, at `moduleVersion` |
-| Variables | 15 `CR_*` settings the runbook reads at start-up |
+| Variables | 17 `CR_*` settings the runbook reads at start-up |
 | Workspace | `CredentialRotation_CL` custom table, ingestion endpoint and rule |
 | Workbook | who read which credential, when it was replaced |
 | Roles | Key Vault Secrets Officer, Virtual Machine Contributor, Automation Job Operator, Log Analytics Reader, Monitoring Metrics Publisher |

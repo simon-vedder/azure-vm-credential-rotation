@@ -32,6 +32,17 @@
 .PARAMETER Step
     Names of steps to run. Default is all of them, in order.
 
+.PARAMETER SecondSubscriptionId
+    Subscription holding a second lab (deploy/lab.bicep with deployKeyVault=false,
+    deployWindowsVm=false, nameSuffix=02), for the step that proves the runbook walks
+    more than one subscription. Leave empty to skip that step.
+
+.PARAMETER SecondLabResourceGroupName
+    Its resource group.
+
+.PARAMETER SecondLinuxVMName
+    Its Linux VM.
+
 .PARAMETER Since
     Lower bound for the workspace queries. Defaults to the moment the script started,
     which is right for a full run; when repeating the custom-table step on its own, pass
@@ -72,7 +83,12 @@ param(
     [string]$RunbookName = 'Invoke-CredentialRotation',
     [string]$HoldTagName = 'CredentialRotationHold',
     [string[]]$Step,
-    [datetime]$Since
+    [datetime]$Since,
+
+    # A machine in another subscription, for the cross-subscription step. All three or none.
+    [string]$SecondSubscriptionId,
+    [string]$SecondLabResourceGroupName,
+    [string]$SecondLinuxVMName = 'vm-crot-lnx-02'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -148,7 +164,11 @@ if (`$ctx.ValidateCredentials('$AdminUsername', `$pw)) { 'CRED_OK' } else { 'CRE
 }
 
 function Test-LinuxPassword {
-    param([Parameter(Mandatory)][string]$Password)
+    param(
+        [Parameter(Mandatory)][string]$Password,
+        [string]$ResourceGroupName = $LabResourceGroupName,
+        [string]$VMName = $LinuxVMName
+    )
     $script = @"
 PW=`$(echo '$(ConvertTo-Base64 $Password)' | base64 -d)
 python3 - "`$PW" <<'PY' 2>/dev/null
@@ -157,7 +177,7 @@ h = spwd.getspnam('$AdminUsername').sp_pwdp
 print('PW_OK' if crypt.crypt(sys.argv[1], h) == h else 'PW_BAD')
 PY
 "@
-    $result = Invoke-AzVMRunCommand -ResourceGroupName $LabResourceGroupName -VMName $LinuxVMName `
+    $result = Invoke-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $VMName `
         -CommandId 'RunShellScript' -ScriptString $script -ErrorAction Stop
     $text = ($result.Value | ForEach-Object { $_.Message }) -join "`n"
     if ($text -notmatch 'PW_OK') { throw "Linux password check did not pass: $($text.Trim())" }
@@ -221,13 +241,14 @@ $steps['dry-run-reports-and-changes-nothing'] = {
     $before = (Get-SecretMeta $winPw).Version
     $job = Invoke-RunbookJob -Parameters @{ DryRun = $true }
     Assert-True ($job.Status -eq 'Completed') "job $($job.JobId) ended $($job.Status): $($job.Exception)"
-    Assert-True ($job.Text -match "2 VM\(s\) tagged CredentialRotation=enabled") "discovery line missing:`n$($job.Text)"
+    # Other labs may share the scope, so the count is not pinned - but it has to cover the two here.
+    Assert-True ($job.Text -match "(\d+) VM\(s\) tagged CredentialRotation=enabled" -and [int]$Matches[1] -ge 2) "discovery line missing or fewer than two machines:`n$($job.Text)"
     Assert-True ($job.Text -match "Would rotate Password for $WindowsVMName \[Access\]") "WhatIf line missing:`n$($job.Text)"
     Assert-True ($job.Text -match 'DRY RUN - nothing was changed') 'dry-run warning missing'
     $s = Get-Summary $job
-    Assert-True ($s.Candidates -eq 1 -and $s.Rotated -eq 0 -and $s.Failed -eq 0) "summary: $($s | ConvertTo-Json -Compress)"
+    Assert-True ($s.Candidates -ge 1 -and $s.Rotated -eq 0 -and $s.Failed -eq 0) "summary: $($s | ConvertTo-Json -Compress)"
     Assert-True ((Get-SecretMeta $winPw).Version -eq $before) 'dry run must not create a new secret version'
-    "job $($job.JobId): found both tagged VMs, 1 due, would rotate, changed nothing"
+    "job $($job.JobId): found the tagged VMs, $($s.Candidates) due, would rotate, changed nothing"
 }
 
 $steps['live-run-rotates-only-what-is-due'] = {
@@ -236,13 +257,17 @@ $steps['live-run-rotates-only-what-is-due'] = {
     $job = Invoke-RunbookJob -Parameters @{ DryRun = $false }
     Assert-True ($job.Status -eq 'Completed') "job $($job.JobId) ended $($job.Status): $($job.Exception)"
     $s = Get-Summary $job
-    Assert-True ($s.Candidates -eq 1 -and $s.Rotated -eq 1 -and $s.Failed -eq 0) "summary: $($s | ConvertTo-Json -Compress)`n$($job.Text)"
+    Assert-True ($s.Rotated -ge 1 -and $s.Failed -eq 0) "summary: $($s | ConvertTo-Json -Compress)`n$($job.Text)"
+    Assert-True ($job.Text -match 'only what is due within') 'the scheduled pass must ask for due credentials only'
+    Assert-True ($job.Text -match "\[$WindowsVMName\] Rotated Password") "the due machine was not rotated:`n$($job.Text)"
     $after = Get-SecretMeta $winPw
     Assert-True ($after.Version -ne $before) 'expected a new secret version'
     Assert-True ($after.Tags.LastTrigger -eq 'Access' -and -not $after.Tags.ContainsKey('RotationReason')) "tags: $($after.Tags | ConvertTo-Json -Compress)"
-    Assert-True ((Get-SecretMeta $lnxPw).Version -eq $lnxBefore) 'the Linux secret was not due and must be untouched'
+    # A credential somebody read within the lookback is due as well (that is the design), so
+    # the Linux secret is only asserted untouched when nobody read it.
+    if ($lnxBefore -eq (Get-SecretMeta $lnxPw).Version) { $untouched = 'the fresh Linux secret untouched' } else { $untouched = 'the Linux secret rotated too (it had been read within the lookback)' }
     Test-WindowsPassword -Password (Get-SecretPlain $winPw)
-    "job $($job.JobId): rotated the one due credential (reason Access), left the other machine alone, guest accepts the password"
+    "job $($job.JobId): rotated the due credential (reason Access), $untouched, guest accepts the password"
 }
 
 $steps['hold-tag-takes-machine-out-of-scope'] = {
@@ -255,7 +280,8 @@ $steps['hold-tag-takes-machine-out-of-scope'] = {
         Assert-True ($job.Status -eq 'Completed') "job $($job.JobId) ended $($job.Status): $($job.Exception)"
         Assert-True ($job.Text -match "\[$LinuxVMName\] on hold, skipping") "hold line missing:`n$($job.Text)"
         $s = Get-Summary $job
-        Assert-True ($s.Candidates -eq 0 -and $s.Rotated -eq 0) "summary with hold: $($s | ConvertTo-Json -Compress)"
+        Assert-True ($s.Failed -eq 0) "summary with hold: $($s | ConvertTo-Json -Compress)"
+        Assert-True ($job.Text -notmatch "\[$LinuxVMName\] (Staged|Rotated)") "held machine must not be touched:`n$($job.Text)"
         Assert-True ((Get-SecretMeta $lnxPw).Version -eq $before) 'held machine must not be rotated'
     }
     finally {
@@ -263,7 +289,7 @@ $steps['hold-tag-takes-machine-out-of-scope'] = {
     }
     $job2 = Invoke-RunbookJob -Parameters @{ DryRun = $false }
     $s2 = Get-Summary $job2
-    Assert-True ($job2.Status -eq 'Completed' -and $s2.Rotated -eq 1 -and $s2.Failed -eq 0) "after removing the hold: $($s2 | ConvertTo-Json -Compress)`n$($job2.Text)"
+    Assert-True ($job2.Status -eq 'Completed' -and $s2.Failed -eq 0 -and $job2.Text -match "\[$LinuxVMName\] Rotated Password") "after removing the hold: $($s2 | ConvertTo-Json -Compress)`n$($job2.Text)"
     Test-LinuxPassword -Password (Get-SecretPlain $lnxPw)
     "job $($job.JobId): held machine skipped with its credential due; job $($job2.JobId): rotated once the tag came off, guest accepts the password"
 }
@@ -297,6 +323,31 @@ $steps['human-read-is-detected-and-rotated'] = {
     "job $($job.JobId): read by $($rows[0].Upn) seen in the audit log, expiry pulled forward, credential replaced in the same run, guest accepts it"
 }
 
+$steps['second-subscription-is-walked'] = {
+    if (-not $SecondSubscriptionId) { return 'skipped: no second subscription given' }
+    # The second machine has no secret yet on a fresh lab, so it is due as Missing; on a
+    # repeat run it exists and gets pulled forward like the others.
+    $secret = "$SecondLinuxVMName-$AdminUsername-pw"
+    $existing = Get-AzKeyVaultSecret -VaultName $VaultName -Name $secret
+    if ($existing) { Set-Due $secret }
+    $before = if ($existing) { $existing.Version } else { $null }
+
+    $job = Invoke-RunbookJob -Parameters @{ DryRun = $false }
+    Assert-True ($job.Status -eq 'Completed') "job $($job.JobId) ended $($job.Status): $($job.Exception)"
+    Assert-True ($job.Text -match "--- Subscription $SecondSubscriptionId ---") "the second subscription was not walked:`n$($job.Text)"
+    Assert-True ($job.Text -match "\[$SecondLinuxVMName\] Rotated Password") "the second machine was not rotated:`n$($job.Text)"
+    $s = Get-Summary $job
+    Assert-True ($s.Failed -eq 0) "summary: $($s | ConvertTo-Json -Compress)`n$($job.Text)"
+    $after = Get-SecretMeta $secret
+    Assert-True ($after.Version -ne $before) 'expected a new secret version for the second machine'
+
+    $homeSubscription = (Get-AzContext).Subscription.Id
+    $null = Set-AzContext -SubscriptionId $SecondSubscriptionId -ErrorAction Stop
+    try { Test-LinuxPassword -Password (Get-SecretPlain $secret) -ResourceGroupName $SecondLabResourceGroupName -VMName $SecondLinuxVMName }
+    finally { $null = Set-AzContext -SubscriptionId $homeSubscription -ErrorAction Stop }
+    "job $($job.JobId): walked the second subscription, rotated $SecondLinuxVMName there, guest accepts the password"
+}
+
 $steps['overlapping-jobs-do-not-fight'] = {
     $first = Start-AzAutomationRunbook -ResourceGroupName $AutomationResourceGroupName -AutomationAccountName $AutomationAccountName -Name $RunbookName -Parameters @{ DryRun = $true } -ErrorAction Stop
     $second = Invoke-RunbookJob -Parameters @{ DryRun = $true }
@@ -317,7 +368,9 @@ $steps['overlapping-jobs-do-not-fight'] = {
 # run
 # ---------------------------------------------------------------------------
 
-$selected = if ($Step) { $steps.Keys | Where-Object { $_ -in $Step } } else { $steps.Keys }
+# pwsh -File hands a comma-separated value over as one string, so split it here.
+$wanted = @($Step | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$selected = if ($wanted) { $steps.Keys | Where-Object { $_ -in $wanted } } else { $steps.Keys }
 $results = foreach ($name in $selected) {
     Write-Host "`n### $name" -ForegroundColor Cyan
     $sw = [System.Diagnostics.Stopwatch]::StartNew()

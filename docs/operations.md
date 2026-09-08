@@ -12,7 +12,13 @@ here means locking yourself out of machines.
 3. **Start the runbook by hand and read the whole output.** Check that it found the
    machine, resolved the right admin username and the right secret name.
 4. **Turn off dry run for that one machine**, let it rotate, then *use* the credential:
-   RDP or SSH in with what is now in the vault.
+   RDP or SSH in with what is now in the vault. Dry run is the automation variable
+   `CR_DryRun`; redeploy with `dryRun=false`, or flip it in place:
+
+   ```bash
+   az automation variable update -g rg-credential-rotation --automation-account-name aa-credential-rotation \
+     --name CR_DryRun --value '"false"'
+   ```
 5. **Then widen the tag.**
 
 ## Everyday tasks

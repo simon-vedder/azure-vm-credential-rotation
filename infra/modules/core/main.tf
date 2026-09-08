@@ -22,19 +22,23 @@ locals {
   # map's *keys* unknown at plan time, which for_each cannot work with.
   variables = merge(
     {
-      CR_VaultName               = var.key_vault_name
-      CR_ThresholdDays           = tostring(var.threshold_days)
-      CR_ValidityDays            = tostring(var.validity_days)
-      CR_EnableTagName           = var.enable_tag_name
-      CR_EnableTagValue          = var.enable_tag_value
-      CR_AutomationAccountName   = azurerm_automation_account.this.name
-      CR_AutomationResourceGroup = var.resource_group_name
+      CR_VaultName                = var.key_vault_name
+      CR_ThresholdDays            = tostring(var.threshold_days)
+      CR_ValidityDays             = tostring(var.validity_days)
+      CR_EnableTagName            = var.enable_tag_name
+      CR_EnableTagValue           = var.enable_tag_value
+      CR_AutomationAccountName    = azurerm_automation_account.this.name
+      CR_AutomationResourceGroup  = var.resource_group_name
+      CR_AutomationSubscriptionId = data.azurerm_client_config.current.subscription_id
+      CR_DryRun                   = tostring(var.dry_run)
     },
     length(var.target_subscription_ids) > 0
     ? { CR_SubscriptionId = join(",", var.target_subscription_ids) }
     : {}
   )
 }
+
+data "azurerm_client_config" "current" {}
 
 resource "azurerm_automation_account" "this" {
   name                = var.automation_account_name
@@ -112,9 +116,8 @@ resource "azurerm_automation_job_schedule" "recurring" {
   runbook_name            = azurerm_automation_runbook.rotation.name
   schedule_name           = azurerm_automation_schedule.recurring.name
 
-  parameters = {
-    dryrun = tostring(var.dry_run)
-  }
+  # No parameters on the link. Automation ignores a PUT on a link that already exists, so a
+  # value here could never be changed by a later apply; dry_run lands in CR_DryRun instead.
 }
 
 ###############################################################################
