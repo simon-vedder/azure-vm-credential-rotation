@@ -310,7 +310,9 @@ Ubuntu 24.04, the strictest of them:
   `Invoke-RenamedAccountProbe.ps1`, described in KNOWN-ISSUES)
 
 Through the deployed runbook (`Invoke-OrchestratorSmokeTest.ps1`), with the automation
-account in one subscription and machines in two:
+account in one subscription and machines in two, deployed from Bicep - and once more from
+the Terraform example, which publishes the flattened artefact instead of importing the
+module:
 
 - the Bicep deployment at subscription scope: automation account, module 0.3.0 from the
   Gallery, runbook, schedule, the 18 variables, role assignments in both subscriptions,
@@ -354,9 +356,12 @@ Still unverified, and worth knowing before you rely on them:
   machines, split the estate across several automation accounts by tag or subscription.
 - **CIS Level 2 on Linux.** There is no CIS Level 2 image for Ubuntu in the marketplace. The
   STIG build was run instead and passed; a hand-built Level 2 baseline is untested.
-- **Terraform.** The Bicep path is the one exercised live. The Terraform modules deploy the
-  same runbook from the committed build artefact and are validated in CI; their last live
-  deployment was with 0.1.0.
+- **Terraform at scale.** The Terraform path was deployed live on 2026-09-08 with the current
+  code - the full example, all 18 variables, the flattened runbook artefact rather than the
+  Gallery module - and rotated three credentials across a Windows and a Linux machine with no
+  failures. One provider quirk came out of it and is worked around in the module: see
+  [KNOWN-ISSUES](KNOWN-ISSUES.md#platform). What has not been exercised there is a large
+  estate or a second subscription; both were tested through Bicep only.
 
 Start in dry-run mode on machines you can afford to lock yourself out of.
 

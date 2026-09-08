@@ -71,6 +71,18 @@ resource "azurerm_automation_runbook" "rotation" {
   # escapes the module directory breaks as soon as the module is consumed from a git
   # URL. CI verifies the artefact matches the sources.
   content = var.runbook_content != null ? var.runbook_content : file("${path.module}/runbook/Invoke-CredentialRotation.ps1")
+
+  lifecycle {
+    # The provider reads runbook_type back as "PowerShell" for a runbook created as
+    # "PowerShell72", so every plan wants to replace the runbook - and with it the job
+    # schedule that points at it. Measured on azurerm 4.81.0 against a live account: the
+    # ARM API returns "PowerShell72" at every api-version, state holds "PowerShell".
+    #
+    # Ignoring the attribute costs nothing here, because the value is hard-coded one line
+    # up and never varies. Take this out when the provider reads it back correctly, and
+    # check with a second `terraform plan` that it stays clean.
+    ignore_changes = [runbook_type]
+  }
 }
 
 resource "azurerm_automation_variable_string" "settings" {
