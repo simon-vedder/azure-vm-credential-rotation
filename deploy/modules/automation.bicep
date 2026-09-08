@@ -1,5 +1,5 @@
 // Resource-group scope: the rotation engine. Automation Account with a system-assigned identity,
-// the CredentialRotation module from the Gallery, the runbook wrapper, the schedule that runs it,
+// the AzureVMCredentialRotation module from the Gallery, the runbook wrapper, the schedule that runs it,
 // and the settings the runbook reads at start-up.
 //
 // This is the equivalent of the Terraform `core` module. Deploy it alone and you get expiry-driven
@@ -10,7 +10,7 @@ param location string
 param automationAccountName string
 param tags object
 
-@description('Where the CredentialRotation module package comes from. A PowerShell Gallery URL, or a GitHub release asset before the first Gallery release.')
+@description('Where the AzureVMCredentialRotation module package comes from. A PowerShell Gallery URL, or a GitHub release asset before the first Gallery release.')
 param modulePackageUri string
 
 @description('Raw URL of the runbook wrapper. Pin it to a tag in production.')
@@ -60,7 +60,7 @@ resource automationAccount 'Microsoft.Automation/automationAccounts@2023-11-01' 
 // Without it a redeploy with the same URI is a no-op.
 resource rotationModule 'Microsoft.Automation/automationAccounts/powershell72Modules@2023-11-01' = {
   parent: automationAccount
-  name: 'CredentialRotation'
+  name: 'AzureVMCredentialRotation'
   properties: {
     contentLink: {
       uri: modulePackageUri

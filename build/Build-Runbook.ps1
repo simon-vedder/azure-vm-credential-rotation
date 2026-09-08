@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Flattens the CredentialRotation module and the runbook wrapper into one file.
+    Flattens the AzureVMCredentialRotation module and the runbook wrapper into one file.
 
 .DESCRIPTION
     Azure Automation executes a single script per job. Importing a module would mean
@@ -39,14 +39,14 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $root = Resolve-Path (Join-Path $PSScriptRoot '..')
-$moduleRoot = Join-Path $root 'src' 'CredentialRotation'
+$moduleRoot = Join-Path $root 'src' 'AzureVMCredentialRotation'
 $runbookPath = Join-Path $root 'src' 'runbooks' 'Invoke-CredentialRotationRunbook.ps1'
 
 foreach ($path in @($moduleRoot, $runbookPath)) {
     if (-not (Test-Path $path)) { throw "Not found: $path" }
 }
 
-$manifest = Import-PowerShellDataFile -Path (Join-Path $moduleRoot 'CredentialRotation.psd1')
+$manifest = Import-PowerShellDataFile -Path (Join-Path $moduleRoot 'AzureVMCredentialRotation.psd1')
 
 # --- split the wrapper on its param block ----------------------------------
 
@@ -80,7 +80,7 @@ $builder = [System.Text.StringBuilder]::new()
     GENERATED FILE - DO NOT EDIT
 
     Built from src/ by build/Build-Runbook.ps1.
-    Edit the module under src/CredentialRotation or the wrapper under src/runbooks,
+    Edit the module under src/AzureVMCredentialRotation or the wrapper under src/runbooks,
     then rebuild and commit the result.
 
     Module version: $($manifest.ModuleVersion)

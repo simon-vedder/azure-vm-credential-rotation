@@ -2,7 +2,7 @@
     GENERATED FILE - DO NOT EDIT
 
     Built from src/ by build/Build-Runbook.ps1.
-    Edit the module under src/CredentialRotation or the wrapper under src/runbooks,
+    Edit the module under src/AzureVMCredentialRotation or the wrapper under src/runbooks,
     then rebuild and commit the result.
 
     Module version: 0.1.0
@@ -1589,12 +1589,12 @@ function Get-RunbookSetting {
 $null = Disable-AzContextAutosave -Scope Process
 
 # Two ways this file reaches Automation, and it has to work for both. The Bicep deployment imports
-# the CredentialRotation module from the Gallery and publishes this wrapper as it stands, so the
+# the AzureVMCredentialRotation module from the Gallery and publishes this wrapper as it stands, so the
 # module has to be imported here. The Terraform deployment publishes the flattened artefact from
 # build/Build-Runbook.ps1, which inlines every function ahead of this line - there the commands are
 # already defined and importing would pull a second, possibly older copy over them.
 if (-not (Get-Command -Name 'Invoke-CredentialRotation' -ErrorAction SilentlyContinue)) {
-    Import-Module -Name 'CredentialRotation' -ErrorAction Stop
+    Import-Module -Name 'AzureVMCredentialRotation' -ErrorAction Stop
 }
 
 Write-Verbose "$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss')) [Info] Connecting with the managed identity" -Verbose

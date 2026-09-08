@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.46.1.21595",
-      "templateHash": "43145401160278433"
+      "templateHash": "3090033699950024441"
     }
   },
   "parameters": {
@@ -27,7 +27,7 @@
     "moduleVersion": {
       "type": "string",
       "metadata": {
-        "description": "CredentialRotation module version on the PowerShell Gallery."
+        "description": "AzureVMCredentialRotation module version on the PowerShell Gallery."
       }
     },
     "contentVersion": {
@@ -223,7 +223,7 @@
     }
   },
   "variables": {
-    "effectiveModuleUri": "[if(empty(parameters('modulePackageUri')), format('https://www.powershellgallery.com/api/v2/package/CredentialRotation/{0}', parameters('moduleVersion')), parameters('modulePackageUri'))]",
+    "effectiveModuleUri": "[if(empty(parameters('modulePackageUri')), format('https://www.powershellgallery.com/api/v2/package/AzureVMCredentialRotation/{0}', parameters('moduleVersion')), parameters('modulePackageUri'))]",
     "effectiveContentVersion": "[if(empty(parameters('contentVersion')), split(parameters('moduleVersion'), '-')[0], parameters('contentVersion'))]",
     "effectiveLookbackHours": "[if(equals(parameters('accessLookbackHours'), 0), mul(parameters('scheduleIntervalHours'), 2), parameters('accessLookbackHours'))]"
   },
@@ -305,7 +305,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.46.1.21595",
-              "templateHash": "9980942638602078565"
+              "templateHash": "12532908747653828669"
             }
           },
           "parameters": {
@@ -321,7 +321,7 @@
             "modulePackageUri": {
               "type": "string",
               "metadata": {
-                "description": "Where the CredentialRotation module package comes from. A PowerShell Gallery URL, or a GitHub release asset before the first Gallery release."
+                "description": "Where the AzureVMCredentialRotation module package comes from. A PowerShell Gallery URL, or a GitHub release asset before the first Gallery release."
               }
             },
             "runbookContentUri": {
@@ -414,7 +414,7 @@
             {
               "type": "Microsoft.Automation/automationAccounts/powerShell72Modules",
               "apiVersion": "2023-11-01",
-              "name": "[format('{0}/{1}', parameters('automationAccountName'), 'CredentialRotation')]",
+              "name": "[format('{0}/{1}', parameters('automationAccountName'), 'AzureVMCredentialRotation')]",
               "properties": {
                 "contentLink": {
                   "uri": "[parameters('modulePackageUri')]",
@@ -443,7 +443,7 @@
               },
               "dependsOn": [
                 "[resourceId('Microsoft.Automation/automationAccounts', parameters('automationAccountName'))]",
-                "[resourceId('Microsoft.Automation/automationAccounts/powerShell72Modules', parameters('automationAccountName'), 'CredentialRotation')]"
+                "[resourceId('Microsoft.Automation/automationAccounts/powerShell72Modules', parameters('automationAccountName'), 'AzureVMCredentialRotation')]"
               ]
             },
             {

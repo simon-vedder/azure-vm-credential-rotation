@@ -185,7 +185,7 @@ pwsh -c 'Invoke-ScriptAnalyzer -Path ./src -Recurse -Settings ./PSScriptAnalyzer
 terraform -chdir=infra/examples/02-full validate
 ```
 
-The logic lives in a proper PowerShell module under [`src/CredentialRotation`](src/CredentialRotation)
+The logic lives in a proper PowerShell module under [`src/AzureVMCredentialRotation`](src/AzureVMCredentialRotation)
 so it can be tested and run locally. Azure Automation executes one script per job, so
 `build/Build-Runbook.ps1` flattens it into [`infra/modules/core/runbook/`](infra/modules/core/runbook), which is committed —
 deploying needs no build step. CI fails if the two drift apart.
@@ -193,7 +193,7 @@ deploying needs no build step. CI fails if the two drift apart.
 Run it locally against a single VM before trusting a schedule:
 
 ```powershell
-Import-Module ./src/CredentialRotation
+Import-Module ./src/AzureVMCredentialRotation
 Connect-AzAccount
 Invoke-CredentialRotation -VaultName kv-creds -WhatIf
 ```

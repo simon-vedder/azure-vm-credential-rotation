@@ -61,7 +61,7 @@ building something similar.
 
 ### Added
 
-- Rotation engine as a PowerShell module (`src/CredentialRotation`), flattened into a
+- Rotation engine as a PowerShell module (`src/AzureVMCredentialRotation`), flattened into a
   single runbook by `build/Build-Runbook.ps1`
 - Calendar-driven rotation of Windows and Linux local passwords and Linux SSH keys
 - Access-driven rotation: a human read pulls the secret's expiry date forward, and the

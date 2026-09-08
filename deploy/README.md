@@ -1,7 +1,7 @@
 # Deploy with Bicep
 
 `main.bicep` deploys the whole thing at subscription scope: a resource group, an Automation Account
-with a system-assigned identity, the `CredentialRotation` module imported from the PowerShell
+with a system-assigned identity, the `AzureVMCredentialRotation` module imported from the PowerShell
 Gallery, the runbook and its schedule, the roles the identity needs, and — unless you turn them off
 — the audit trail and rotation after use.
 
@@ -59,7 +59,7 @@ nothing reports it.
 | Automation Account | system-assigned identity, `disableLocalAuth` |
 | Runbook | `Invoke-CredentialRotation`, PowerShell 7.2 runtime |
 | Schedule | every `scheduleIntervalHours`, default 6 |
-| Module | `CredentialRotation` from the Gallery, at `moduleVersion` |
+| Module | `AzureVMCredentialRotation` from the Gallery, at `moduleVersion` |
 | Variables | 15 `CR_*` settings the runbook reads at start-up |
 | Workspace | `CredentialRotation_CL` custom table, ingestion endpoint and rule |
 | Workbook | who read which credential, when it was replaced |

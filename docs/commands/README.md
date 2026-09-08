@@ -1,4 +1,4 @@
-# CredentialRotation command reference
+# AzureVMCredentialRotation command reference
 
 Credential lifecycle for Azure VMs that cannot use Windows LAPS or Entra login. Rotates local admin passwords and SSH keys, driven by Key Vault expiry dates.
 
@@ -9,7 +9,7 @@ Credential lifecycle for Azure VMs that cannot use Windows LAPS or Entra login. 
 | Module version | 0.1.0 |
 | PowerShell | 7.2+ (Core) |
 | Required modules | `Az.Accounts`, `Az.Compute`, `Az.KeyVault`, `Az.OperationalInsights`, `Az.Resources` |
-| Getting it | `Install-Module CredentialRotation`, or let the deployment pull it at the pinned version |
+| Getting it | `Install-Module AzureVMCredentialRotation`, or let the deployment pull it at the pinned version |
 
 Per-command permissions are on each page under **Requirements and notes**.
 
