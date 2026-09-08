@@ -5,6 +5,7 @@
     Author            = 'Simon Vedder'
     Description       = 'Credential lifecycle for Azure VMs that cannot use Windows LAPS or Entra login. Rotates local admin passwords and SSH keys, driven by Key Vault expiry dates.'
     PowerShellVersion = '7.2'
+    CompatiblePSEditions = @('Core')
 
     RequiredModules   = @(
         'Az.Accounts'

@@ -58,7 +58,31 @@ describes what an event-driven version would take and why it costs more than it 
 
 ## Deploy
 
-Three Terraform modules that stack. `core` works alone.
+Two ways in, one tool. They create the same resources and configure the runbook through the same
+`CR_*` automation variables — a test compares the two sets on every push, so they cannot quietly
+drift apart. [ADR 0007](docs/decisions/0007-bicep-beside-terraform.md) says why both exist.
+
+### Bicep
+
+One command, everything in it, dry-run by default:
+
+```bash
+az deployment sub create \
+  --location switzerlandnorth \
+  --template-file deploy/main.bicep \
+  --parameters moduleVersion=0.1.0 \
+               keyVaultName=kv-credentials \
+               keyVaultResourceGroupName=rg-vault \
+               targetResourceGroupNames='["rg-workloads"]'
+```
+
+Feature flags rather than stacked modules: `deployObservability` for the audit trail (on),
+`enableRotateOnAccess` for rotation after use (off), `dryRun` for whether anything is actually
+replaced (on, deliberately). Full parameter list and a `what-if` recipe in [`deploy/`](deploy).
+
+### Terraform
+
+Three modules that stack. `core` works alone.
 
 | module | what it adds | needs |
 |---|---|---|
@@ -84,6 +108,10 @@ module "rotation" {
 
 Working examples: [01-minimal](infra/examples/01-minimal) and
 [02-full](infra/examples/02-full).
+
+The Terraform path publishes the flattened runbook artefact from `build/Build-Runbook.ps1`; the
+Bicep path imports the module from the PowerShell Gallery instead. The runbook wrapper works either
+way — see [ADR 0006](docs/decisions/0006-the-module-goes-to-the-gallery.md).
 
 ### Opting a machine in
 

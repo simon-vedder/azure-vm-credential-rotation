@@ -1,6 +1,6 @@
 # 0004 — A PowerShell module, flattened at build time
 
-**Status:** accepted · 2026-07-31
+**Status:** accepted · 2026-07-31 · the gallery rejection below is superseded by [0006](0006-the-module-goes-to-the-gallery.md)
 
 ## Context
 
