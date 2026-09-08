@@ -5,6 +5,19 @@ official documentation, *(to verify)* on the lab list. Nothing here is guessed.
 
 ## Behaviour
 
+- *(observed)* **Two machines with the same name share one secret.** A VM name is unique in a
+  resource group, not in a subscription, and the default template `{vm}-{user}-{kind}` uses
+  neither the resource group nor the subscription. `web-01` in `rg-prod` and `web-01` in
+  `rg-test` therefore resolve to the same secret: the first rotation writes it, the second
+  finds it and, under `-OnlyIfDue`, leaves it alone - so the vault holds a credential that
+  works on one of the two machines with nothing recording which. Found on 2026-09-08 while
+  building the scale lab, which is why that template takes a name prefix per region. No
+  lockout: both machines keep working credentials, but one of them is not the one in the
+  vault. Where duplicate names are possible, key the name by resource group instead:
+  `-SecretNameTemplate '{rg}-{vm}-{kind}'`. The `{rg}` placeholder exists for this and is
+  refused if no resource group is supplied. Changing the template on an estate that is
+  already rotating starts new secrets under the new names; the old ones stay until removed.
+
 - *(observed)* The staging secret `<name>-pending` is written with a one-day expiry, so a
   machine that stays off for longer than that has an **expired** staging secret waiting when
   the next run tries to resume. Verified against a real vault on 2026-09-08: a staging secret
@@ -46,10 +59,14 @@ listed before and after. The two platforms behave differently, and neither locks
 
 ## Hardened images
 
-Measured on 2026-09-08 against the CIS Level 1 marketplace images for Windows Server 2022
-(`cis-windows-server-2022-l1-gen2`) and Ubuntu 24.04 (`cis-ubuntulinux2404-l1-gen2`), with the
-same checks as the plain images: every Windows path passed (7 of 7), every Linux path passed
-(4 of 4), including SSH login with the rotated key and the password against the shadow hash.
+Measured on 2026-09-08 against four hardened marketplace images: CIS Level 1 for Windows
+Server 2022 (`cis-windows-server-2022-l1-gen2`) and Ubuntu 24.04
+(`cis-ubuntulinux2404-l1-gen2`), CIS Level 2 for Windows Server 2022
+(`cis-windows-server-2022-l2-gen2`), and the CIS STIG build of Ubuntu 24.04
+(`cis-ubuntu2404-stig-gen2`, which is the strictest of the four and stands in for a Linux
+Level 2, since none is published). The same checks as the plain images, and every path
+passed on every image, including SSH login with the rotated key and the password against
+the shadow hash.
 
 - *(observed)* **Windows, CIS L1.** Minimum password age is one day, minimum length 14, history
   24, lockout after five attempts. None of it got in the way: VMAccess sets the password
@@ -70,6 +87,20 @@ same checks as the plain images: every Windows path passed (7 of 7), every Linux
   profile's setting to `50-cloud-init.conf`, which sshd reads first, so the effective value
   follows the Azure OS profile - the same switch the module consults. `PermitRootLogin no`
   and `MaxAuthTries 4` do not affect VMAccess, which works through the agent, not SSH.
+- *(observed)* **A hardened guest can expire the password before the vault does.** The CIS
+  STIG image for Ubuntu 24.04 sets a maximum password age of 60 days (`chage -l`), while
+  `-ValidityDays` defaults to 90. The account's password then expires in the guest three
+  weeks before anything schedules a rotation, and password logins start demanding a change.
+  Measured on 2026-09-08. Set `-ValidityDays` (or `validityDays` in the deployment) below the
+  shortest maximum age in the estate; the CIS Level 1 images use 365 on both platforms, the
+  STIG image 60. Nothing warns about this: the tool sets the credential, it does not read the
+  guest's aging policy.
+- *(observed)* **CIS STIG for Ubuntu, and why the generated password satisfies it.** The STIG
+  image enforces `minlen 15`, `difok 8`, `dictcheck`, `enforcing = 1` and one character from
+  each of the four classes (`dcredit`/`ucredit`/`lcredit`/`ocredit` at -1). The generator
+  draws one character from each class before filling the rest, which is what makes it pass by
+  construction rather than by luck. Every rotation path was run against this image on
+  2026-09-08 and passed, as did CIS Level 2 for Windows Server 2022.
 - *(observed)* SSH keys accumulate in `authorized_keys` across rotations unless
   `-RemovePriorSshKeys` is set: two rotations, two keys. That is the documented default, and
   the reason for it is on the parameter.

@@ -80,7 +80,7 @@ nothing reports it.
 | Runbook | `Invoke-CredentialRotation`, PowerShell 7.2 runtime |
 | Schedule | every `scheduleIntervalHours`, default 6 |
 | Module | `AzureVMCredentialRotation` from the Gallery, at `moduleVersion` |
-| Variables | 17 `CR_*` settings the runbook reads at start-up |
+| Variables | 18 `CR_*` settings the runbook reads at start-up |
 | Workspace | `CredentialRotation_CL` custom table, ingestion endpoint and rule |
 | Workbook | who read which credential, when it was replaced |
 | Roles | Key Vault Secrets Officer, Virtual Machine Contributor, Automation Job Operator, Log Analytics Reader, Monitoring Metrics Publisher |
@@ -127,6 +127,31 @@ The initial password is generated and forgotten on purpose: the first rotation r
 from then on the vault is the only place it lives. `tests/manual/Invoke-LabSmokeTest.ps1` runs the
 module through every path against these two machines and checks each result on the guest through
 Run Command.
+
+`lab.bicep` also builds the variations the verification needs: `deployKeyVault=false` and
+`deployWindowsVm=false` for a second lab in another subscription, and `windowsImage` /
+`linuxImage` with their `windowsPlan` / `linuxPlan` for marketplace images such as the CIS
+hardened ones (accept the terms first with `az vm image terms accept`). Note that the CIS
+Windows images are SCSI-only and will not boot on the v6 sizes, which are NVMe.
+
+## Scale lab
+
+`lab-scale.bicep` builds a fleet of small Linux machines, so the per-machine cost of a pass can
+be measured rather than guessed - `tests/manual/Measure-RotationThroughput.ps1` does the
+measuring and prints what fits in Automation's three-hour job limit.
+
+```bash
+az group create -n rg-crot-scale -l westeurope
+az deployment group create -g rg-crot-scale -f deploy/lab.bicep \
+  -p adminPassword=... deployerObjectId=... deployWindowsVm=false deployLinuxVm=false   # vault only
+az deployment group create -g rg-crot-scale -f deploy/lab-scale.bicep \
+  -p adminPassword=... vmCount=7 namePrefix=vm-crot-w location=westeurope
+```
+
+The quota that bites here is **Total Regional Cores**, not the per-family one that is easy to
+find: a region granted 14 cores holds seven 2-vCPU machines whatever the family limits say.
+Spread a larger fleet over regions with a different `namePrefix` each - secret names are derived
+from VM names, so two machines with the same name would share one secret in the vault.
 
 Between sessions:
 

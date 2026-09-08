@@ -61,6 +61,9 @@ param enableTagName string = 'CredentialRotation'
 @description('Value that tag must carry.')
 param enableTagValue string = 'enabled'
 
+@description('How secret names are built, from {vm}, {user}, {rg} and {kind}. Use {rg} where two machines could share a name: a VM name is unique in a resource group, not in a subscription, and the default would put both on one secret. It has to stay the same for the life of a secret.')
+param secretNameTemplate string = '{vm}-{user}-{kind}'
+
 // ---------------------------------------------------------------------------------------------
 // timing
 // ---------------------------------------------------------------------------------------------
@@ -188,6 +191,7 @@ module automation 'modules/automation.bicep' = {
     validityDays: validityDays
     enableTagName: enableTagName
     enableTagValue: enableTagValue
+    secretNameTemplate: secretNameTemplate
     scheduleIntervalHours: scheduleIntervalHours
     scheduleStartTime: scheduleStartTime
     scheduleTimeZone: scheduleTimeZone

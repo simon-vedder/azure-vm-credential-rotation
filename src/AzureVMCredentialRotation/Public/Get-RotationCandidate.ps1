@@ -32,8 +32,8 @@ function Get-RotationCandidate {
         How close to expiry counts as due. Only consulted with -OnlyIfDue.
 
     .PARAMETER SecretNameTemplate
-        How secret names are built from {vm}, {user} and {kind}. Must match what was used
-        when the secrets were written, or nothing will be found.
+        How secret names are built from {vm}, {user}, {rg} and {kind}. Must match what was
+        used when the secrets were written, or nothing will be found.
 
         The last point is the design in one sentence: the expiry date is the only
         signal. Everything else writes to it.
@@ -90,8 +90,8 @@ function Get-RotationCandidate {
 
         foreach ($type in $types) {
             $kind = if ($type -eq 'Password') { 'pw' } else { 'ssh-priv' }
-            $secretName = Resolve-SecretName -VMName $vm.Name -AdminUsername $adminUsername -Kind $kind -Template $SecretNameTemplate
-            $pendingName = Resolve-SecretName -VMName $vm.Name -AdminUsername $adminUsername -Kind $kind -Pending -Template $SecretNameTemplate
+            $secretName = Resolve-SecretName -VMName $vm.Name -AdminUsername $adminUsername -Kind $kind -ResourceGroupName $vm.ResourceGroupName -Template $SecretNameTemplate
+            $pendingName = Resolve-SecretName -VMName $vm.Name -AdminUsername $adminUsername -Kind $kind -ResourceGroupName $vm.ResourceGroupName -Pending -Template $SecretNameTemplate
 
             $reason = $null
             $expiresOn = $null

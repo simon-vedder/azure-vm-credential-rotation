@@ -212,6 +212,27 @@ Describe 'Resolve-SecretName' {
         Resolve-SecretName -VMName 'vm__01' -AdminUsername 'ad' -Kind 'pw' | Should -Not -Match '--'
     }
 
+    It 'puts two machines of the same name on one secret under the default template' {
+        # Not a wish, a warning. A VM name is not unique in a subscription, so this is the
+        # collision {rg} exists to solve, and KNOWN-ISSUES describes what it costs.
+        $prod = Resolve-SecretName -VMName 'web-01' -AdminUsername 'azureadmin' -Kind 'pw' -ResourceGroupName 'rg-prod'
+        $test = Resolve-SecretName -VMName 'web-01' -AdminUsername 'azureadmin' -Kind 'pw' -ResourceGroupName 'rg-test'
+        $prod | Should -Be $test
+    }
+
+    It 'separates them once the template keys by resource group' {
+        $prod = Resolve-SecretName -VMName 'web-01' -AdminUsername 'azureadmin' -Kind 'pw' -ResourceGroupName 'rg-prod' -Template '{rg}-{vm}-{kind}'
+        $test = Resolve-SecretName -VMName 'web-01' -AdminUsername 'azureadmin' -Kind 'pw' -ResourceGroupName 'rg-test' -Template '{rg}-{vm}-{kind}'
+        $prod | Should -Be 'rg-prod-web-01-pw'
+        $test | Should -Be 'rg-test-web-01-pw'
+    }
+
+    It 'refuses a template that uses {rg} without a resource group' {
+        # Dropping it silently would produce a deliberate-looking name that collides anyway.
+        { Resolve-SecretName -VMName 'web-01' -AdminUsername 'azureadmin' -Kind 'pw' -Template '{rg}-{vm}-{kind}' } |
+            Should -Throw -ExpectedMessage '*uses {rg}*'
+    }
+
     It 'stays within the 127 character limit and stays unique' {
         $long = 'a' * 120
         $first = Resolve-SecretName -VMName $long -AdminUsername 'administrator' -Kind 'pw'

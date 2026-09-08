@@ -33,6 +33,9 @@ param validityDays int
 param enableTagName string
 param enableTagValue string
 
+@description('How secret names are built, from {vm}, {user}, {rg} and {kind}.')
+param secretNameTemplate string
+
 param scheduleIntervalHours int
 param scheduleStartTime string
 param scheduleTimeZone string
@@ -141,6 +144,7 @@ var coreSettings = {
   CR_ValidityDays: string(validityDays)
   CR_EnableTagName: enableTagName
   CR_EnableTagValue: enableTagValue
+  CR_SecretNameTemplate: secretNameTemplate
   CR_AutomationAccountName: automationAccountName
   CR_AutomationResourceGroup: resourceGroup().name
   CR_AutomationSubscriptionId: subscription().subscriptionId

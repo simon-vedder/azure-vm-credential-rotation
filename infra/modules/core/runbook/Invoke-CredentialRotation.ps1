@@ -5,7 +5,7 @@
     Edit the module under src/AzureVMCredentialRotation or the wrapper under src/runbooks,
     then rebuild and commit the result.
 
-    Module version: 0.3.0
+    Module version: 0.4.0
 #>
 
 #Requires -Version 7.2
@@ -40,6 +40,11 @@
     CR_AccessRotationEnabled. Deploy neither and the runbook falls back to plain
     expiry-driven rotation.
 
+.PARAMETER SecretNameTemplate
+    How secret names are built, from {vm}, {user}, {rg} and {kind}. Defaults to the shape
+    this tool has always used. Set it where two machines could share a name, or where the
+    vault already has a convention; it has to stay the same for the life of a secret.
+
 .PARAMETER HoldTagName
     VM tag that takes a machine out of scope for this run without untagging it. Checked
     here rather than in the module, because it is a policy statement about a machine
@@ -70,6 +75,11 @@ param(
 
     [string]$EnableTagName,
     [string]$EnableTagValue,
+
+    # A vault with its own convention, or an estate where two machines can share a name -
+    # a VM name is unique in a resource group, not in a subscription, so '{rg}-{vm}-{kind}'
+    # is what keeps those two apart. Must stay the same for the life of a secret.
+    [string]$SecretNameTemplate,
 
     # Not an automation variable on purpose: adding one would change the deployment
     # contract that Bicep, Terraform and the contract test all agree on, for a name
@@ -486,11 +496,21 @@ function Resolve-SecretName {
         ssh-pub  - SSH public key, Linux
         pending  - staged value written before the VM is updated, see Update-VMCredential
 
+    .PARAMETER ResourceGroupName
+        Fills {rg}. Required only when the template uses it.
+
     .PARAMETER Template
-        How the name is built, with {vm}, {user} and {kind} as placeholders. The default
-        is the shape this tool has always used. It has to contain {vm} and {kind}: without
-        the first every machine lands on the same secret, without the second a password
-        and an SSH key do. {user} is optional, for vaults that already key by machine.
+        How the name is built, with {vm}, {user}, {rg} and {kind} as placeholders. The
+        default is the shape this tool has always used. It has to contain {vm} and {kind}:
+        without the first every machine lands on the same secret, without the second a
+        password and an SSH key do. {user} is optional, for vaults that already key by
+        machine.
+
+        {rg} exists because a VM name is not unique in a subscription. Two machines called
+        web-01 in different resource groups resolve to one secret under the default
+        template, and the vault then holds a credential that works on one of them with
+        nothing saying which - see KNOWN-ISSUES. Where that can happen, key the name by
+        resource group as well: '{rg}-{vm}-{kind}'.
     #>
     [CmdletBinding()]
     [OutputType([string])]
@@ -498,6 +518,7 @@ function Resolve-SecretName {
         [Parameter(Mandatory)][string]$VMName,
         [Parameter(Mandatory)][string]$AdminUsername,
         [Parameter(Mandatory)][ValidateSet('pw', 'ssh-priv', 'ssh-pub')][string]$Kind,
+        [string]$ResourceGroupName,
         [switch]$Pending,
         [ValidateNotNullOrEmpty()][string]$Template = '{vm}-{user}-{kind}'
     )
@@ -508,6 +529,11 @@ function Resolve-SecretName {
         }
     }
 
+    # Silently dropping {rg} would produce a name that looks deliberate and collides anyway.
+    if ($Template -like '*{rg}*' -and [string]::IsNullOrWhiteSpace($ResourceGroupName)) {
+        throw "Secret name template '$Template' uses {rg}, but no resource group name was supplied."
+    }
+
     $normalise = {
         param($value)
         ($value -replace '[^a-zA-Z0-9-]', '-') -replace '-+', '-'
@@ -516,6 +542,7 @@ function Resolve-SecretName {
     $name = $Template.
         Replace('{vm}', (& $normalise $VMName)).
         Replace('{user}', (& $normalise $AdminUsername)).
+        Replace('{rg}', (& $normalise ([string]$ResourceGroupName))).
         Replace('{kind}', $Kind)
     # Literal characters in the template get the same treatment as the values.
     $name = (& $normalise $name)
@@ -725,8 +752,8 @@ function Get-RotationCandidate {
         How close to expiry counts as due. Only consulted with -OnlyIfDue.
 
     .PARAMETER SecretNameTemplate
-        How secret names are built from {vm}, {user} and {kind}. Must match what was used
-        when the secrets were written, or nothing will be found.
+        How secret names are built from {vm}, {user}, {rg} and {kind}. Must match what was
+        used when the secrets were written, or nothing will be found.
 
         The last point is the design in one sentence: the expiry date is the only
         signal. Everything else writes to it.
@@ -783,8 +810,8 @@ function Get-RotationCandidate {
 
         foreach ($type in $types) {
             $kind = if ($type -eq 'Password') { 'pw' } else { 'ssh-priv' }
-            $secretName = Resolve-SecretName -VMName $vm.Name -AdminUsername $adminUsername -Kind $kind -Template $SecretNameTemplate
-            $pendingName = Resolve-SecretName -VMName $vm.Name -AdminUsername $adminUsername -Kind $kind -Pending -Template $SecretNameTemplate
+            $secretName = Resolve-SecretName -VMName $vm.Name -AdminUsername $adminUsername -Kind $kind -ResourceGroupName $vm.ResourceGroupName -Template $SecretNameTemplate
+            $pendingName = Resolve-SecretName -VMName $vm.Name -AdminUsername $adminUsername -Kind $kind -ResourceGroupName $vm.ResourceGroupName -Pending -Template $SecretNameTemplate
 
             $reason = $null
             $expiresOn = $null
@@ -889,8 +916,10 @@ function Invoke-CredentialRotation {
         How close to expiry counts as due. Only consulted with -OnlyIfDue.
 
     .PARAMETER SecretNameTemplate
-        How secret names are built from {vm}, {user} and {kind}. Change it to fit a vault
-        that already has a naming convention; keep it the same for the life of a secret.
+        How secret names are built from {vm}, {user}, {rg} and {kind}. Change it to fit a
+        vault that already has a naming convention; keep it the same for the life of a
+        secret. Use {rg} where two machines could share a name - a VM name is not unique in
+        a subscription, and the default template would put both on one secret.
 
     .EXAMPLE
         Invoke-CredentialRotation -VaultName kv-creds -VMName jump-01 -WhatIf
@@ -1245,8 +1274,8 @@ function Update-VMCredential {
     }
 
     $kind = if ($CredentialType -eq 'Password') { 'pw' } else { 'ssh-priv' }
-    $secretName = Resolve-SecretName -VMName $VM.Name -AdminUsername $adminUsername -Kind $kind -Template $SecretNameTemplate
-    $pendingName = Resolve-SecretName -VMName $VM.Name -AdminUsername $adminUsername -Kind $kind -Pending -Template $SecretNameTemplate
+    $secretName = Resolve-SecretName -VMName $VM.Name -AdminUsername $adminUsername -Kind $kind -ResourceGroupName $VM.ResourceGroupName -Template $SecretNameTemplate
+    $pendingName = Resolve-SecretName -VMName $VM.Name -AdminUsername $adminUsername -Kind $kind -ResourceGroupName $VM.ResourceGroupName -Pending -Template $SecretNameTemplate
 
     $record = @{
         SecretName        = $secretName
@@ -1351,7 +1380,7 @@ function Update-VMCredential {
     # The public key is not secret, but keeping it beside the private key saves
     # anyone from having to derive it later.
     if ($CredentialType -eq 'SSHKey' -and $publicKey) {
-        $publicName = Resolve-SecretName -VMName $VM.Name -AdminUsername $adminUsername -Kind 'ssh-pub' -Template $SecretNameTemplate
+        $publicName = Resolve-SecretName -VMName $VM.Name -AdminUsername $adminUsername -Kind 'ssh-pub' -ResourceGroupName $VM.ResourceGroupName -Template $SecretNameTemplate
         $null = Set-AzKeyVaultSecret -VaultName $VaultName -Name $publicName `
             -SecretValue (ConvertTo-SecureString -String $publicKey -AsPlainText -Force) `
             -Expires (Get-Date).ToUniversalTime().AddDays($ValidityDays) `
@@ -1653,6 +1682,7 @@ $config = @{
     ValidityDays          = [int](Get-RunbookSetting -Name 'ValidityDays' -Value $ValidityDays -Default 90)
     EnableTagName         = Get-RunbookSetting -Name 'EnableTagName' -Value $EnableTagName -Default 'CredentialRotation'
     EnableTagValue        = Get-RunbookSetting -Name 'EnableTagValue' -Value $EnableTagValue -Default 'enabled'
+    SecretNameTemplate    = Get-RunbookSetting -Name 'SecretNameTemplate' -Value $SecretNameTemplate -Default '{vm}-{user}-{kind}'
     SkipSshKeys           = $SkipSshKeys
     RemovePriorSshKeys    = $RemovePriorSshKeys
     ResetSshConfiguration = $ResetSshConfiguration
@@ -1845,6 +1875,8 @@ if ($workspaceId) {
         $reads = @(Get-AccessedSecret @queryParams)
         Write-Verbose "$($reads.Count) secret(s) read by a person in the last $($optional['AccessLookbackHours']) h" -Verbose
 
+        # No template here on purpose: the audit log reports the secret name that was read,
+        # so the name arrives from the vault rather than being rebuilt.
         $marked = @($reads | Register-CredentialAccess -VaultName $config.VaultName `
                 -GracePeriodHours $optional['GracePeriodHours'] -WhatIf:$DryRun -Confirm:$false)
         $totals.AccessMarked = @($marked | Where-Object { $_.Applied }).Count
@@ -1910,6 +1942,7 @@ foreach ($sub in $targetSubscriptions) {
         OnlyIfDue             = $true
         ThresholdDays         = $config.ThresholdDays
         ValidityDays          = $config.ValidityDays
+        SecretNameTemplate    = $config.SecretNameTemplate
         SkipSshKeys           = $config.SkipSshKeys
         RemovePriorSshKeys    = $config.RemovePriorSshKeys
         ResetSshConfiguration = $config.ResetSshConfiguration

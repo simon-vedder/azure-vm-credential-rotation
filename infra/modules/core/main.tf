@@ -27,6 +27,7 @@ locals {
       CR_ValidityDays             = tostring(var.validity_days)
       CR_EnableTagName            = var.enable_tag_name
       CR_EnableTagValue           = var.enable_tag_value
+      CR_SecretNameTemplate       = var.secret_name_template
       CR_AutomationAccountName    = azurerm_automation_account.this.name
       CR_AutomationResourceGroup  = var.resource_group_name
       CR_AutomationSubscriptionId = data.azurerm_client_config.current.subscription_id

@@ -31,7 +31,7 @@ expiry-driven rotation.
 ## Syntax
 
 ```powershell
-./Invoke-CredentialRotationRunbook.ps1 [[-VaultName] <string>] [[-SubscriptionId] <string>] [[-ThresholdDays] <int>] [[-ValidityDays] <int>] [[-EnableTagName] <string>] [[-EnableTagValue] <string>] [[-HoldTagName] <string>] [[-SkipSshKeys] <bool>] [[-RemovePriorSshKeys] <bool>] [[-ResetSshConfiguration] <bool>] [[-DryRun] <bool>] [<CommonParameters>]
+./Invoke-CredentialRotationRunbook.ps1 [[-VaultName] <string>] [[-SubscriptionId] <string>] [[-ThresholdDays] <int>] [[-ValidityDays] <int>] [[-EnableTagName] <string>] [[-EnableTagValue] <string>] [[-SecretNameTemplate] <string>] [[-HoldTagName] <string>] [[-SkipSshKeys] <bool>] [[-RemovePriorSshKeys] <bool>] [[-ResetSshConfiguration] <bool>] [[-DryRun] <bool>] [<CommonParameters>]
 ```
 
 ## Requirements and notes
@@ -52,6 +52,7 @@ Requires the automation account's managed identity to hold:
 | `-ValidityDays` | Int32 | no | no | 0 |  |
 | `-EnableTagName` | String | no | no |  |  |
 | `-EnableTagValue` | String | no | no |  |  |
+| `-SecretNameTemplate` | String | no | no |  | How secret names are built, from {vm}, {user}, {rg} and {kind}. Defaults to the shape this tool has always used. Set it where two machines could share a name, or where the vault already has a convention; it has to stay the same for the life of a secret. |
 | `-HoldTagName` | String | no | no | CredentialRotationHold | VM tag that takes a machine out of scope for this run without untagging it. Checked here rather than in the module, because it is a policy statement about a machine rather than a fact about the credential. |
 | `-SkipSshKeys` | Boolean | no | no |  |  |
 | `-RemovePriorSshKeys` | Boolean | no | no |  |  |

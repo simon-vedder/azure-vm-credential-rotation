@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.46.1.21595",
-      "templateHash": "3545122923229031779"
+      "templateHash": "17977052187113953206"
     }
   },
   "parameters": {
@@ -97,6 +97,13 @@
       "defaultValue": "enabled",
       "metadata": {
         "description": "Value that tag must carry."
+      }
+    },
+    "secretNameTemplate": {
+      "type": "string",
+      "defaultValue": "{vm}-{user}-{kind}",
+      "metadata": {
+        "description": "How secret names are built, from {vm}, {user}, {rg} and {kind}. Use {rg} where two machines could share a name: a VM name is unique in a resource group, not in a subscription, and the default would put both on one secret. It has to stay the same for the life of a secret."
       }
     },
     "thresholdDays": {
@@ -295,6 +302,9 @@
           "enableTagValue": {
             "value": "[parameters('enableTagValue')]"
           },
+          "secretNameTemplate": {
+            "value": "[parameters('secretNameTemplate')]"
+          },
           "scheduleIntervalHours": {
             "value": "[parameters('scheduleIntervalHours')]"
           },
@@ -318,7 +328,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.46.1.21595",
-              "templateHash": "11722480649172383356"
+              "templateHash": "10545308665919035259"
             }
           },
           "parameters": {
@@ -379,6 +389,12 @@
             "enableTagValue": {
               "type": "string"
             },
+            "secretNameTemplate": {
+              "type": "string",
+              "metadata": {
+                "description": "How secret names are built, from {vm}, {user}, {rg} and {kind}."
+              }
+            },
             "scheduleIntervalHours": {
               "type": "int"
             },
@@ -408,6 +424,7 @@
               "CR_ValidityDays": "[string(parameters('validityDays'))]",
               "CR_EnableTagName": "[parameters('enableTagName')]",
               "CR_EnableTagValue": "[parameters('enableTagValue')]",
+              "CR_SecretNameTemplate": "[parameters('secretNameTemplate')]",
               "CR_AutomationAccountName": "[parameters('automationAccountName')]",
               "CR_AutomationResourceGroup": "[resourceGroup().name]",
               "CR_AutomationSubscriptionId": "[subscription().subscriptionId]",
