@@ -17,6 +17,10 @@ vault that holds your credentials should outlive any one tool.
 
 ## The smallest useful deployment
 
+[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fsimon-vedder%2Fazure-vm-credential-rotation%2Fmain%2Fdeploy%2Fazuredeploy.json)
+
+The button opens the portal with the compiled template and asks for the parameters. From a shell:
+
 ```bash
 az deployment sub create \
   --location switzerlandnorth \
