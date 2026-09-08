@@ -31,6 +31,10 @@ function Get-RotationCandidate {
     .PARAMETER ThresholdDays
         How close to expiry counts as due. Only consulted with -OnlyIfDue.
 
+    .PARAMETER SecretNameTemplate
+        How secret names are built from {vm}, {user} and {kind}. Must match what was used
+        when the secrets were written, or nothing will be found.
+
         The last point is the design in one sentence: the expiry date is the only
         signal. Everything else writes to it.
 
@@ -50,7 +54,9 @@ function Get-RotationCandidate {
         [ValidateRange(0, 3650)][int]$ThresholdDays = 14,
 
         # Linux VMs get an SSH key rotated unless this is set.
-        [switch]$SkipSshKeys
+        [switch]$SkipSshKeys,
+
+        [ValidateNotNullOrEmpty()][string]$SecretNameTemplate = '{vm}-{user}-{kind}'
     )
 
     $candidates = [System.Collections.Generic.List[object]]::new()
@@ -84,8 +90,8 @@ function Get-RotationCandidate {
 
         foreach ($type in $types) {
             $kind = if ($type -eq 'Password') { 'pw' } else { 'ssh-priv' }
-            $secretName = Resolve-SecretName -VMName $vm.Name -AdminUsername $adminUsername -Kind $kind
-            $pendingName = Resolve-SecretName -VMName $vm.Name -AdminUsername $adminUsername -Kind $kind -Pending
+            $secretName = Resolve-SecretName -VMName $vm.Name -AdminUsername $adminUsername -Kind $kind -Template $SecretNameTemplate
+            $pendingName = Resolve-SecretName -VMName $vm.Name -AdminUsername $adminUsername -Kind $kind -Pending -Template $SecretNameTemplate
 
             $reason = $null
             $expiresOn = $null

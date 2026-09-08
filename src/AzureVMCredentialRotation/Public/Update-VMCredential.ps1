@@ -52,7 +52,9 @@ function Update-VMCredential {
         [string]$TriggeredBy,
 
         [switch]$RemovePriorSshKeys,
-        [switch]$ResetSshConfiguration
+        [switch]$ResetSshConfiguration,
+
+        [ValidateNotNullOrEmpty()][string]$SecretNameTemplate = '{vm}-{user}-{kind}'
     )
 
     $startedAt = (Get-Date).ToUniversalTime()
@@ -65,8 +67,8 @@ function Update-VMCredential {
     }
 
     $kind = if ($CredentialType -eq 'Password') { 'pw' } else { 'ssh-priv' }
-    $secretName = Resolve-SecretName -VMName $VM.Name -AdminUsername $adminUsername -Kind $kind
-    $pendingName = Resolve-SecretName -VMName $VM.Name -AdminUsername $adminUsername -Kind $kind -Pending
+    $secretName = Resolve-SecretName -VMName $VM.Name -AdminUsername $adminUsername -Kind $kind -Template $SecretNameTemplate
+    $pendingName = Resolve-SecretName -VMName $VM.Name -AdminUsername $adminUsername -Kind $kind -Pending -Template $SecretNameTemplate
 
     $record = @{
         SecretName        = $secretName
@@ -171,7 +173,7 @@ function Update-VMCredential {
     # The public key is not secret, but keeping it beside the private key saves
     # anyone from having to derive it later.
     if ($CredentialType -eq 'SSHKey' -and $publicKey) {
-        $publicName = Resolve-SecretName -VMName $VM.Name -AdminUsername $adminUsername -Kind 'ssh-pub'
+        $publicName = Resolve-SecretName -VMName $VM.Name -AdminUsername $adminUsername -Kind 'ssh-pub' -Template $SecretNameTemplate
         $null = Set-AzKeyVaultSecret -VaultName $VaultName -Name $publicName `
             -SecretValue (ConvertTo-SecureString -String $publicKey -AsPlainText -Force) `
             -Expires (Get-Date).ToUniversalTime().AddDays($ValidityDays) `

@@ -227,6 +227,32 @@ Describe 'Resolve-SecretName' {
         $ssh = Resolve-SecretName -VMName 'vm01' -AdminUsername 'ad' -Kind 'ssh-priv'
         $pw | Should -Not -Be $ssh
     }
+
+    It 'follows a template a vault already uses' {
+        Resolve-SecretName -VMName 'vm01' -AdminUsername 'ad' -Kind 'pw' -Template 'prod-{kind}-{vm}' |
+            Should -Be 'prod-pw-vm01'
+    }
+
+    It 'still adds the pending suffix under a template' {
+        Resolve-SecretName -VMName 'vm01' -AdminUsername 'ad' -Kind 'pw' -Template 'prod-{kind}-{vm}' -Pending |
+            Should -Be 'prod-pw-vm01-pending'
+    }
+
+    It 'lets {user} be left out' {
+        Resolve-SecretName -VMName 'vm01' -AdminUsername 'ad' -Kind 'pw' -Template '{vm}-{kind}' |
+            Should -Be 'vm01-pw'
+    }
+
+    It 'refuses a template that would make credentials collide' {
+        # Without {kind} a password and an SSH key share one secret; without {vm} every machine does.
+        { Resolve-SecretName -VMName 'vm01' -AdminUsername 'ad' -Kind 'pw' -Template '{vm}-{user}' } | Should -Throw -ExpectedMessage '*{kind}*'
+        { Resolve-SecretName -VMName 'vm01' -AdminUsername 'ad' -Kind 'pw' -Template '{user}-{kind}' } | Should -Throw -ExpectedMessage '*{vm}*'
+    }
+
+    It 'normalises literal characters in the template too' {
+        Resolve-SecretName -VMName 'vm01' -AdminUsername 'ad' -Kind 'pw' -Template 'team_a/{vm}/{kind}' |
+            Should -Match '^[a-zA-Z0-9-]+$'
+    }
 }
 
 Describe 'Get-RotationSecret' {
@@ -268,50 +294,59 @@ Describe 'Get-RotationSecret' {
     }
 }
 
-Describe 'Get-AccessedSecret' {
+Describe 'Register-CredentialAccess' {
 
-    It 'returns nothing when no reads are found' {
-        Mock Invoke-AzOperationalInsightsQuery { return [pscustomobject]@{ Results = @() } }
-
-        (Get-AccessedSecret -WorkspaceId 'ws' -VaultName 'kv').Count | Should -Be 0
-    }
-
-    It 'projects the query result' {
-        Mock Invoke-AzOperationalInsightsQuery {
-            return [pscustomobject]@{
-                Results = @(
-                    [pscustomobject]@{
-                        SecretName     = 'vm01-admin-pw'
-                        LastAccessedAt = '2026-07-31T09:15:00Z'
-                        AccessedBy     = 'someone@example.com'
-                        AccessCount    = '2'
-                    }
-                )
+    BeforeEach {
+        $script:written = @()
+        Mock Update-AzKeyVaultSecret { $script:written += [pscustomobject]@{ Name = $Name; Expires = $Expires; Tag = $Tag } }
+        Mock Get-RotationSecret {
+            [pscustomobject]@{
+                Exists = $true
+                Secret = [pscustomobject]@{ Expires = (Get-Date).ToUniversalTime().AddDays(60); Tags = @{ VMName = 'vm01' } }
             }
         }
-
-        $result = @(Get-AccessedSecret -WorkspaceId 'ws' -VaultName 'kv')
-
-        $result.Count | Should -Be 1
-        $result[0].SecretName | Should -Be 'vm01-admin-pw'
-        $result[0].AccessCount | Should -Be 2
-        $result[0].LastAccessedAt | Should -BeOfType [datetime]
     }
 
-    It 'filters to the requested vault and excludes given object ids' {
-        $script:capturedQuery = $null
-        Mock Invoke-AzOperationalInsightsQuery {
-            $script:capturedQuery = $Query
-            return [pscustomobject]@{ Results = @() }
+    It 'takes the reads from the pipeline, by property name' {
+        $reads = @(
+            [pscustomobject]@{ SecretName = 'vm01-ad-pw'; AccessedBy = 'a@example.com'; LastAccessedAt = (Get-Date) }
+            [pscustomobject]@{ SecretName = 'vm02-ad-pw'; AccessedBy = 'b@example.com'; LastAccessedAt = (Get-Date) }
+        )
+        $result = @($reads | Register-CredentialAccess -VaultName 'kv' -Confirm:$false)
+        $result.Count | Should -Be 2
+        $result.Applied | Should -Not -Contain $false
+        $script:written.Count | Should -Be 2
+    }
+
+    It 'never treats a staging secret as human access' {
+        $result = @(Register-CredentialAccess -VaultName 'kv' -SecretName 'vm01-ad-pw-pending' -AccessedBy 'a@example.com' -Confirm:$false)
+        $result | Should -BeNullOrEmpty
+        $script:written.Count | Should -Be 0
+    }
+
+    It 'never pushes an expiry date further out than it already is' {
+        Mock Get-RotationSecret {
+            [pscustomobject]@{
+                Exists = $true
+                Secret = [pscustomobject]@{ Expires = (Get-Date).ToUniversalTime().AddHours(2); Tags = @{} }
+            }
         }
+        $result = Register-CredentialAccess -VaultName 'kv' -SecretName 'vm01-ad-pw' -AccessedBy 'a@example.com' -GracePeriodHours 8 -Confirm:$false
+        $result.Applied | Should -BeFalse
+        $script:written.Count | Should -Be 0
+    }
 
-        Get-AccessedSecret -WorkspaceId 'ws' -VaultName 'my-vault' -ExcludeObjectId @('abc-123') | Out-Null
+    It 'keeps the existing tags and marks the reason' {
+        $null = Register-CredentialAccess -VaultName 'kv' -SecretName 'vm01-ad-pw' -AccessedBy 'a@example.com' -Confirm:$false
+        $script:written[0].Tag['VMName'] | Should -Be 'vm01'
+        $script:written[0].Tag['RotationReason'] | Should -Be 'Access'
+        $script:written[0].Tag['LastAccessedBy'] | Should -Be 'a@example.com'
+    }
 
-        $script:capturedQuery | Should -Match "my-vault"
-        $script:capturedQuery | Should -Match "abc-123"
-        $script:capturedQuery | Should -Match "SecretGet"
-        # Application identities must not trigger rotation.
-        $script:capturedQuery | Should -Match "isnotempty\(Upn\)"
+    It 'does nothing under -WhatIf and says so' {
+        $result = Register-CredentialAccess -VaultName 'kv' -SecretName 'vm01-ad-pw' -AccessedBy 'a@example.com' -WhatIf
+        $result.Applied | Should -BeFalse
+        $script:written.Count | Should -Be 0
     }
 }
 
@@ -518,11 +553,30 @@ Describe 'The module holds no selection policy' {
         $offenders | Should -BeNullOrEmpty -Because "tags are the orchestrator's vocabulary, but these use them: $($offenders -join ', ')"
     }
 
-    It 'and the runbook does both, so the behaviour did not simply disappear' {
+    It 'never asks Log Analytics who read a credential, and never ships a record' {
+        # Finding the reads and delivering the telemetry both depend on infrastructure the
+        # orchestrator deployed. The module returns facts; where they came from and where
+        # they go is the caller's.
+        $offenders = foreach ($file in $script:SourceFiles) {
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$null)
+            $calls = $ast.FindAll({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.CommandAst] -and
+                    $node.GetCommandName() -in 'Invoke-AzOperationalInsightsQuery', 'Invoke-RestMethod', 'Invoke-WebRequest'
+                }, $true)
+            if ($calls.Count) { $file.Name }
+        }
+        $offenders | Should -BeNullOrEmpty -Because "these reach out to a workspace or an ingestion endpoint on their own: $($offenders -join ', ')"
+    }
+
+    It 'and the runbook does all of it, so the behaviour did not simply disappear' {
         $runbook = Get-Content -Path $script:RunbookFile -Raw
         $runbook | Should -Match 'Get-AzVM'
         $runbook | Should -Match 'EnableTagName'
         $runbook | Should -Match 'HoldTagName'
+        $runbook | Should -Match 'AZKVAuditLogs'
+        $runbook | Should -Match 'Invoke-AzOperationalInsightsQuery'
+        $runbook | Should -Match 'dataCollectionRules'
     }
 
     It 'and the scheduled pass asks for due credentials only' {

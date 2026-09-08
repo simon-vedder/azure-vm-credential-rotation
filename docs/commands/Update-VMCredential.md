@@ -28,7 +28,7 @@ Close-PendingCredential for why both of those fail against a real vault.
 ## Syntax
 
 ```powershell
-Update-VMCredential [-VaultName] <string> [-VM] <Object> [-CredentialType] <string> [[-ValidityDays] <int>] [[-TriggerReason] <string>] [[-TriggeredBy] <string>] [-RemovePriorSshKeys] [-ResetSshConfiguration] [-WhatIf] [-Confirm] [<CommonParameters>]
+Update-VMCredential [-VaultName] <string> [-VM] <Object> [-CredentialType] <string> [[-ValidityDays] <int>] [[-TriggerReason] <string>] [[-TriggeredBy] <string>] [[-SecretNameTemplate] <string>] [-RemovePriorSshKeys] [-ResetSshConfiguration] [-WhatIf] [-Confirm] [<CommonParameters>]
 ```
 
 ## Parameters
@@ -43,6 +43,7 @@ Update-VMCredential [-VaultName] <string> [-VM] <Object> [-CredentialType] <stri
 | `-TriggeredBy` | String | no | no |  |  |
 | `-RemovePriorSshKeys` | SwitchParameter | no | no |  | Defaults to false, deliberately. The VMAccess extension can wipe every entry in authorized_keys, which takes out colleagues, configuration management and backup agents along with the key you meant to replace. Turn it on only if you are certain this tool owns every key on the machine. |
 | `-ResetSshConfiguration` | SwitchParameter | no | no |  | Defaults to false, deliberately. VMAccess can restore sshd configuration to its default, which silently undoes hardening on a CIS-baselined host. |
+| `-SecretNameTemplate` | String | no | no | {vm}-{user}-{kind} |  |
 
 Supports `-WhatIf` and `-Confirm`.
 

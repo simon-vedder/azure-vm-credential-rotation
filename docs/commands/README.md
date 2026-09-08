@@ -8,7 +8,7 @@ Credential lifecycle for Azure VMs that cannot use Windows LAPS or Entra login. 
 |---|---|
 | Module version | 0.3.0 |
 | PowerShell | 7.2+ (Core) |
-| Required modules | `Az.Accounts`, `Az.Compute`, `Az.KeyVault`, `Az.OperationalInsights`, `Az.Resources` |
+| Required modules | `Az.Accounts`, `Az.Compute`, `Az.KeyVault`, `Az.Resources` |
 | Getting it | `Install-Module AzureVMCredentialRotation`, or let the deployment pull it at the pinned version |
 
 Per-command permissions are on each page under **Requirements and notes**.
