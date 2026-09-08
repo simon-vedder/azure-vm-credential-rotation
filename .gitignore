@@ -4,6 +4,10 @@
 *.tfstate.*
 *.tfvars
 !*.tfvars.example
+# A saved plan is a zip that embeds the state it was planned against, so it carries
+# subscription and tenant ids even when the variables file it came from is ignored.
+*.tfplan
+*.tfplan.*
 crash.log
 crash.*.log
 override.tf
