@@ -5,7 +5,7 @@
     Edit the module under src/AzureVMCredentialRotation or the wrapper under src/runbooks,
     then rebuild and commit the result.
 
-    Module version: 0.4.0
+    Module version: 0.4.1
 #>
 
 #Requires -Version 7.2
@@ -539,10 +539,15 @@ function Resolve-SecretName {
         ($value -replace '[^a-zA-Z0-9-]', '-') -replace '-+', '-'
     }
 
+    # {rg} is lower-cased, the others are not. A subscription-wide Get-AzVM returns the resource
+    # group name upper-cased while a targeted one returns it as typed, so the same machine would
+    # otherwise produce a differently-cased name depending on how the caller found it. Key Vault
+    # looks names up case-insensitively, so this is about a stable name rather than a second
+    # secret - but a name that changes shape between the runbook and a prompt is its own problem.
     $name = $Template.
         Replace('{vm}', (& $normalise $VMName)).
         Replace('{user}', (& $normalise $AdminUsername)).
-        Replace('{rg}', (& $normalise ([string]$ResourceGroupName))).
+        Replace('{rg}', (& $normalise ([string]$ResourceGroupName)).ToLowerInvariant()).
         Replace('{kind}', $Kind)
     # Literal characters in the template get the same treatment as the values.
     $name = (& $normalise $name)

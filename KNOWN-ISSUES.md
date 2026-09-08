@@ -5,6 +5,14 @@ official documentation, *(to verify)* on the lab list. Nothing here is guessed.
 
 ## Behaviour
 
+- *(observed)* **Key Vault looks secret names up case-insensitively, and Azure is inconsistent
+  about the case of a resource group name.** A subscription-wide `Get-AzVM` returns it
+  upper-cased; a targeted `Get-AzVM -ResourceGroupName` returns it as typed. With a `{rg}`
+  template the same machine would therefore be written as `RG-PROD-web-01-pw` by the runbook
+  and `rg-prod-web-01-pw` from a prompt. No second secret is created - a lookup finds the
+  other casing, verified against a real vault - but the name changes shape depending on who
+  wrote it, so `{rg}` is lower-cased before substitution. Names built from `{vm}` and `{user}`
+  keep their original casing, because those values are consistent.
 - *(observed)* **Two machines with the same name share one secret.** A VM name is unique in a
   resource group, not in a subscription, and the default template `{vm}-{user}-{kind}` uses
   neither the resource group nor the subscription. `web-01` in `rg-prod` and `web-01` in
@@ -56,6 +64,28 @@ listed before and after. The two platforms behave differently, and neither locks
   rotation is recorded as `Failed`, the staged value stays in the `-pending` secret, the
   renamed account and its password are untouched. The next run retries; rename the account
   back, or update the OS profile, and it resumes from the staged value.
+
+## What a rotation changes besides the credential
+
+Measured on 2026-09-08 with `tests/manual/Test-HardeningDrift.ps1`, which photographs the
+settings a baseline checks, rotates, and photographs them again.
+
+- *(observed)* **On Linux the extension restores passwordless sudo.** VMAccess writes
+  `/etc/sudoers.d/waagent` containing `<user> ALL = (ALL) NOPASSWD: ALL` for the OS-profile
+  account. On a stock image cloud-init has already granted the same thing, so nothing changes.
+  On a machine where somebody removed that grant deliberately - a standard hardening step - the
+  next rotation puts it back, silently and every time. Verified by removing both
+  `/etc/sudoers.d/waagent` and `/etc/sudoers.d/90-cloud-init-users`, rotating, and finding
+  `waagent` recreated with `NOPASSWD: ALL`. This is the same class of problem as VMAccess
+  recreating a deleted account, and more likely to be hit. If passwordless sudo is not
+  acceptable for the account that holds the credential, keep the machine out of scope, or
+  reassert the sudoers policy after rotation with configuration management.
+- *(observed)* **On Windows, nothing moved at all.** The full local security policy, the audit
+  policy, local group membership, the enabled accounts, the RDP setting and the password policy
+  were identical before and after a rotation on the CIS Level 2 image. The password change goes
+  through the account-management API and touches nothing else.
+- *(observed)* On the STIG Ubuntu image the only other differences were the `chage` last-change
+  date and the key count in `authorized_keys`, both of which are the rotation doing its job.
 
 ## Hardened images
 
