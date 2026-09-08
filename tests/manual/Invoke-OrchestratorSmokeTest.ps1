@@ -241,8 +241,10 @@ $steps['dry-run-reports-and-changes-nothing'] = {
     $before = (Get-SecretMeta $winPw).Version
     $job = Invoke-RunbookJob -Parameters @{ DryRun = $true }
     Assert-True ($job.Status -eq 'Completed') "job $($job.JobId) ended $($job.Status): $($job.Exception)"
-    # Other labs may share the scope, so the count is not pinned - but it has to cover the two here.
-    Assert-True ($job.Text -match "(\d+) VM\(s\) tagged CredentialRotation=enabled" -and [int]$Matches[1] -ge 2) "discovery line missing or fewer than two machines:`n$($job.Text)"
+    # Other labs may share the scope and the run walks one subscription after another, so the
+    # count is not pinned - but across all of them it has to cover the two machines here.
+    $tagged = @([regex]::Matches($job.Text, '(\d+) VM\(s\) tagged CredentialRotation=enabled') | ForEach-Object { [int]$_.Groups[1].Value })
+    Assert-True (($tagged | Measure-Object -Sum).Sum -ge 2) "discovery line missing or fewer than two machines:`n$($job.Text)"
     Assert-True ($job.Text -match "Would rotate Password for $WindowsVMName \[Access\]") "WhatIf line missing:`n$($job.Text)"
     Assert-True ($job.Text -match 'DRY RUN - nothing was changed') 'dry-run warning missing'
     $s = Get-Summary $job
