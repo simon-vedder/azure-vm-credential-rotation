@@ -296,6 +296,10 @@ foreach ($sub in $targetSubscriptions) {
     $params = @{
         VaultName             = $config.VaultName
         VM                    = $full
+        # A scheduled pass replaces what is due, not everything it can see. The module
+        # rotates whatever it is handed unless told otherwise, so this switch is what
+        # keeps a six-hourly job from re-rolling every credential in the estate.
+        OnlyIfDue             = $true
         ThresholdDays         = $config.ThresholdDays
         ValidityDays          = $config.ValidityDays
         SkipSshKeys           = $config.SkipSshKeys

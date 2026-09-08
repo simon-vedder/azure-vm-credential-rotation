@@ -15,13 +15,13 @@ something to rotate. Rotation is triggered by one of five conditions:
   Expiry        - the expiry date is within the threshold
   Access        - not detected here; access pulls the expiry date forward,
                   and this function then sees it as Expiry
-  Manual        - -IgnoreExpiry was set, so a healthy credential is replaced
-                  anyway
+  Manual        - nothing else applied, so the credential is replaced because
+                  the caller asked for this machine
 
 ## Syntax
 
 ```powershell
-Get-RotationCandidate [-VaultName] <string> [-VM] <Object[]> [[-ThresholdDays] <int>] [-IgnoreExpiry] [-SkipSshKeys] [<CommonParameters>]
+Get-RotationCandidate [-VaultName] <string> [-VM] <Object[]> [[-ThresholdDays] <int>] [-OnlyIfDue] [-SkipSshKeys] [<CommonParameters>]
 ```
 
 ## Parameters
@@ -30,8 +30,8 @@ Get-RotationCandidate [-VaultName] <string> [-VM] <Object[]> [[-ThresholdDays] <
 |---|---|---|---|---|---|
 | `-VaultName` | String | yes | no |  |  |
 | `-VM` | Object[] | yes | no |  | The machines to examine. Objects from Get-AzVM, fetched by the caller. |
-| `-ThresholdDays` | Int32 | no | no | 14 |  |
-| `-IgnoreExpiry` | SwitchParameter | no | no |  | Treat a healthy, unexpired credential as due anyway, reported as Manual. This is what somebody naming a single machine means: they asked for that machine, and a threshold quietly deciding to do nothing would be the wrong answer. A scheduled pass leaves it off and lets the expiry date decide. The last point is the design in one sentence: the expiry date is the only signal. Everything else writes to it. |
+| `-OnlyIfDue` | SwitchParameter | no | no |  | Consult the expiry date instead of rotating regardless. Without it every machine handed in is a candidate, which is what asking for a machine means. A scheduled pass sets it, so it touches only what is missing, half-rotated or near expiry. |
+| `-ThresholdDays` | Int32 | no | no | 14 | How close to expiry counts as due. Only consulted with -OnlyIfDue. The last point is the design in one sentence: the expiry date is the only signal. Everything else writes to it. |
 | `-SkipSshKeys` | SwitchParameter | no | no |  | Linux VMs get an SSH key rotated unless this is set. |
 
 ## Examples

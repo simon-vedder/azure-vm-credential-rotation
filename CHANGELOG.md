@@ -10,24 +10,31 @@ uses, where the module never reads a tag and the runbook owns discovery.
 
 ### Breaking
 
-- `Invoke-CredentialRotation` no longer discovers machines. It takes `-VMName` (rotate that
-  one, now) or `-VM` (machines the caller selected, expiry threshold applies). The
-  subscription loop, `-EnableTagName`, `-EnableTagValue` and `-HoldTagName` are gone.
+- `Invoke-CredentialRotation` no longer discovers machines. It takes `-VMName` (one, by
+  name) or `-VM` (machines the caller selected). The subscription loop, `-EnableTagName`,
+  `-EnableTagValue` and `-HoldTagName` are gone.
+- **Everything handed in is rotated.** Whether the expiry date gets a vote is `-OnlyIfDue`,
+  a parameter of its own — not something inferred from whether you passed a name or a list.
+  How you identify machines and what should happen to them are two questions, and the first
+  answer was letting the shape of the input decide the second. `-ThresholdDays` is only
+  consulted with `-OnlyIfDue`, and warns if you pass it without.
 - `Invoke-CredentialRotation` no longer runs the access scan. Call
   `Register-CredentialAccess` first if you want rotation after use; it pulls the expiry
   dates forward and the rotation then sees ordinary ageing. One signal, one code path,
   and the orchestrator decides how often to look.
-- `Get-RotationCandidate` requires `-VM` and lost the tag parameters. New `-IgnoreExpiry`
-  replaces the implicit behaviour of naming a machine, so the intent is stated rather than
-  inferred from which parameter was bound.
+- `Get-RotationCandidate` requires `-VM` and lost the tag parameters. New `-OnlyIfDue`
+  turns the expiry check on; without it every machine handed in is a candidate.
 - `Register-CredentialAccess` lost `-HoldTagName`. A hold is a statement about a machine,
   not a fact about a credential.
 
 ### Added
 
 - The runbook wrapper is now the orchestrator: tag discovery, hold filtering, the
-  subscription walk and the access scan all live there. It also refetches each selected
-  machine in full, because the list form of `Get-AzVM` has no `OSProfile`.
+  subscription walk and the access scan all live there, and it passes `-OnlyIfDue` so a
+  six-hourly job replaces what is due rather than everything it can see. It also refetches
+  each selected machine in full, because the list form of `Get-AzVM` has no `OSProfile`.
+- A test asserting the scheduled pass asks for due credentials only, because the safe
+  default moved out of the module and into the caller.
 - Two tests that assert the layering itself, through the PowerShell parser rather than a
   regex: the module never calls `Get-AzVM` without `-Name` or `-ResourceGroupName`, and no
   module file uses a tag variable. A third checks the runbook does both, so the behaviour
