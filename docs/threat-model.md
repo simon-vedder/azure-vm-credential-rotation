@@ -51,6 +51,13 @@ trail will show a successful rotation rather than a re-created admin account.
 *Mitigation:* remove the tag from machines whose OS-profile account should not exist,
 and treat `Missing` rotations on old machines as worth a look.
 
+*Measured, 2026-09-08* (`tests/manual/Invoke-RenamedAccountProbe.ps1`): on Windows the
+extension created a new account under the OS-profile name (RID 1000, Administrators) beside
+the renamed original (RID 500) and reported `Rotated`. On Linux `useradd` refused, because
+the renamed account still owned the uid and the home directory, and the rotation was
+recorded as `Failed` with the value still staged. Details in
+[KNOWN-ISSUES](../KNOWN-ISSUES.md#the-account-was-renamed-inside-the-guest).
+
 ### The identity needs extension-install rights
 
 Virtual Machine Contributor cannot be narrowed further for this purpose — setting a

@@ -35,7 +35,12 @@
     rather than a fact about the credential.
 
 .PARAMETER DryRun
-    Runs the whole pass under -WhatIf. Use this first, always.
+    Runs the whole pass under -WhatIf. Use this first, always. Passed explicitly for a
+    manual run; the scheduled job leaves it to the automation variable CR_DryRun, which is
+    what the deployment's dryRun setting writes. It lives in a variable rather than in the
+    job schedule's parameters because Automation ignores a PUT on a schedule link that
+    already exists - a redeployment with dryRun=false would report success and change
+    nothing.
 
 .NOTES
     Requires the automation account's managed identity to hold:
@@ -125,6 +130,32 @@ if (-not (Get-Command -Name 'Invoke-CredentialRotation' -ErrorAction SilentlyCon
 Write-Verbose "$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss')) [Info] Connecting with the managed identity" -Verbose
 $null = Connect-AzAccount -Identity -ErrorAction Stop
 
+# The identity may hold roles in several subscriptions, and Connect-AzAccount then picks the
+# first one it sees - measured: with a machine in a second subscription, the job started in
+# that one, and the concurrent-job check below looked for the automation account there,
+# failed, and let two jobs run side by side. So the context is pinned to the account's own
+# subscription before anything else reads it.
+$homeSubscriptionId = [string](Get-RunbookSetting -Name 'AutomationSubscriptionId' -Default '')
+if (-not $homeSubscriptionId) {
+    # Deployments older than this variable: find the account among the subscriptions the
+    # identity can see.
+    $homeAccount = Get-RunbookSetting -Name 'AutomationAccountName' -Default ''
+    $homeGroup = Get-RunbookSetting -Name 'AutomationResourceGroup' -Default ''
+    foreach ($candidate in @(Get-AzSubscription -ErrorAction SilentlyContinue)) {
+        $null = Set-AzContext -SubscriptionId $candidate.Id -ErrorAction SilentlyContinue
+        if ($homeAccount -and $homeGroup -and (Get-AzResource -ResourceGroupName $homeGroup -Name $homeAccount -ResourceType 'Microsoft.Automation/automationAccounts' -ErrorAction SilentlyContinue)) {
+            $homeSubscriptionId = $candidate.Id
+            break
+        }
+    }
+}
+if ($homeSubscriptionId) {
+    $null = Set-AzContext -SubscriptionId $homeSubscriptionId -ErrorAction Stop
+}
+else {
+    Write-Warning 'Could not determine the automation account''s own subscription; the concurrent-job check and the default subscription may be wrong.'
+}
+
 # ---------------------------------------------------------------------------
 # resolve configuration
 # ---------------------------------------------------------------------------
@@ -142,6 +173,12 @@ $config = @{
 
 if ([string]::IsNullOrWhiteSpace($config.VaultName)) {
     throw 'No vault name. Pass -VaultName or set the automation variable CR_VaultName.'
+}
+
+# A [bool] parameter cannot say "not given", so the variable is consulted only when the
+# parameter was left out - which is what the scheduled job does.
+if (-not $PSBoundParameters.ContainsKey('DryRun')) {
+    $DryRun = [System.Convert]::ToBoolean([string](Get-RunbookSetting -Name 'DryRun' -Default 'false'))
 }
 
 $subscriptions = if ($SubscriptionId) {

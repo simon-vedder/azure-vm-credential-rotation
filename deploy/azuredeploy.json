@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.46.1.21595",
-      "templateHash": "3090033699950024441"
+      "templateHash": "3545122923229031779"
     }
   },
   "parameters": {
@@ -68,14 +68,21 @@
       "type": "array",
       "defaultValue": [],
       "metadata": {
-        "description": "Resource groups whose VMs the identity may manage. Empty grants Virtual Machine Contributor across the whole subscription instead - keep this list narrow, because that role includes installing extensions, which is code execution as SYSTEM or root on every VM in scope."
+        "description": "Resource groups in this subscription whose VMs the identity may manage, by name. Keep the list narrow: Virtual Machine Contributor includes installing extensions, which is code execution as SYSTEM or root on every VM in scope. With nothing named here, in targetResourceGroupIds or in targetSubscriptionIds, the identity gets the role across this whole subscription instead."
+      }
+    },
+    "targetResourceGroupIds": {
+      "type": "array",
+      "defaultValue": [],
+      "metadata": {
+        "description": "Resource groups in any subscription of this tenant, as full resource IDs (/subscriptions/<id>/resourceGroups/<name>). The identity gets Virtual Machine Contributor on each, and the runbook walks every subscription named here. The deployer needs the right to assign roles there."
       }
     },
     "targetSubscriptionIds": {
       "type": "array",
       "defaultValue": [],
       "metadata": {
-        "description": "Subscriptions the runbook processes. Empty means the automation account's own subscription only."
+        "description": "Subscriptions the identity may manage as a whole: Virtual Machine Contributor at subscription scope on each, and the runbook walks them. Prefer targetResourceGroupIds; see the warning on targetResourceGroupNames."
       }
     },
     "enableTagName": {
@@ -134,7 +141,7 @@
       "type": "bool",
       "defaultValue": true,
       "metadata": {
-        "description": "Run the schedule under -WhatIf: report what would be rotated, change nothing. On by default. Read one run, then redeploy with this off."
+        "description": "Run the schedule under -WhatIf: report what would be rotated, change nothing. On by default. Read one run, then redeploy with this off - or flip the CR_DryRun variable on the account, which is where this lands."
       }
     },
     "logVerbose": {
@@ -225,7 +232,10 @@
   "variables": {
     "effectiveModuleUri": "[if(empty(parameters('modulePackageUri')), format('https://www.powershellgallery.com/api/v2/package/AzureVMCredentialRotation/{0}', parameters('moduleVersion')), parameters('modulePackageUri'))]",
     "effectiveContentVersion": "[if(empty(parameters('contentVersion')), split(parameters('moduleVersion'), '-')[0], parameters('contentVersion'))]",
-    "effectiveLookbackHours": "[if(equals(parameters('accessLookbackHours'), 0), mul(parameters('scheduleIntervalHours'), 2), parameters('accessLookbackHours'))]"
+    "effectiveLookbackHours": "[if(equals(parameters('accessLookbackHours'), 0), mul(parameters('scheduleIntervalHours'), 2), parameters('accessLookbackHours'))]",
+    "resourceGroupTargets": "[map(parameters('targetResourceGroupIds'), lambda('id', createObject('subscriptionId', split(lambdaVariables('id'), '/')[2], 'name', split(lambdaVariables('id'), '/')[4])))]",
+    "walkedSubscriptionIds": "[union(parameters('targetSubscriptionIds'), map(variables('resourceGroupTargets'), lambda('t', lambdaVariables('t').subscriptionId)), if(empty(parameters('targetResourceGroupNames')), createArray(), createArray(subscription().subscriptionId)))]",
+    "nothingNamed": "[and(and(empty(parameters('targetResourceGroupNames')), empty(parameters('targetResourceGroupIds'))), empty(parameters('targetSubscriptionIds')))]"
   },
   "resources": [
     {
@@ -264,11 +274,14 @@
           "contentVersion": {
             "value": "[variables('effectiveContentVersion')]"
           },
+          "deploymentStamp": {
+            "value": "[parameters('baseTime')]"
+          },
           "keyVaultName": {
             "value": "[parameters('keyVaultName')]"
           },
           "targetSubscriptionIds": {
-            "value": "[join(parameters('targetSubscriptionIds'), ',')]"
+            "value": "[join(variables('walkedSubscriptionIds'), ',')]"
           },
           "thresholdDays": {
             "value": "[parameters('thresholdDays')]"
@@ -305,7 +318,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.46.1.21595",
-              "templateHash": "12532908747653828669"
+              "templateHash": "11722480649172383356"
             }
           },
           "parameters": {
@@ -334,6 +347,12 @@
               "type": "string",
               "metadata": {
                 "description": "Version stamp for the module package and runbook content. Change it to force a re-import of an unchanged URI."
+              }
+            },
+            "deploymentStamp": {
+              "type": "string",
+              "metadata": {
+                "description": "A value unique to this deployment, used to seed the job schedule id. See the note on that resource."
               }
             },
             "keyVaultName": {
@@ -390,7 +409,9 @@
               "CR_EnableTagName": "[parameters('enableTagName')]",
               "CR_EnableTagValue": "[parameters('enableTagValue')]",
               "CR_AutomationAccountName": "[parameters('automationAccountName')]",
-              "CR_AutomationResourceGroup": "[resourceGroup().name]"
+              "CR_AutomationResourceGroup": "[resourceGroup().name]",
+              "CR_AutomationSubscriptionId": "[subscription().subscriptionId]",
+              "CR_DryRun": "[string(parameters('dryRun'))]"
             }
           },
           "resources": [
@@ -464,16 +485,13 @@
             {
               "type": "Microsoft.Automation/automationAccounts/jobSchedules",
               "apiVersion": "2023-11-01",
-              "name": "[format('{0}/{1}', parameters('automationAccountName'), guid(resourceId('Microsoft.Automation/automationAccounts', parameters('automationAccountName')), 'rotation', 'Invoke-CredentialRotation'))]",
+              "name": "[format('{0}/{1}', parameters('automationAccountName'), guid(resourceId('Microsoft.Automation/automationAccounts', parameters('automationAccountName')), 'rotation', 'Invoke-CredentialRotation', parameters('deploymentStamp')))]",
               "properties": {
                 "schedule": {
                   "name": "[format('Invoke-CredentialRotation-every-{0}h', parameters('scheduleIntervalHours'))]"
                 },
                 "runbook": {
                   "name": "Invoke-CredentialRotation"
-                },
-                "parameters": {
-                  "dryrun": "[string(parameters('dryRun'))]"
                 }
               },
               "dependsOn": [
@@ -659,7 +677,113 @@
       ]
     },
     {
-      "condition": "[empty(parameters('targetResourceGroupNames'))]",
+      "copy": {
+        "name": "vmRoleAtResourceGroupElsewhere",
+        "count": "[length(variables('resourceGroupTargets'))]"
+      },
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "[format('role-vm-{0}', uniqueString(variables('resourceGroupTargets')[copyIndex()].subscriptionId, variables('resourceGroupTargets')[copyIndex()].name))]",
+      "subscriptionId": "[variables('resourceGroupTargets')[copyIndex()].subscriptionId]",
+      "resourceGroup": "[variables('resourceGroupTargets')[copyIndex()].name]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "principalId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('resourceGroupName')), 'Microsoft.Resources/deployments', 'automation'), '2025-04-01').outputs.principalId.value]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.46.1.21595",
+              "templateHash": "15519951712538538799"
+            }
+          },
+          "parameters": {
+            "principalId": {
+              "type": "string"
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "name": "[guid(resourceGroup().id, parameters('principalId'), '9980e02c-c2be-4d73-94e8-173b1dc7cf3c')]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '9980e02c-c2be-4d73-94e8-173b1dc7cf3c')]",
+                "principalId": "[parameters('principalId')]",
+                "principalType": "ServicePrincipal"
+              }
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('resourceGroupName')), 'Microsoft.Resources/deployments', 'automation')]"
+      ]
+    },
+    {
+      "copy": {
+        "name": "vmRoleAtListedSubscription",
+        "count": "[length(parameters('targetSubscriptionIds'))]"
+      },
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "[format('role-vm-sub-{0}', uniqueString(parameters('targetSubscriptionIds')[copyIndex()]))]",
+      "subscriptionId": "[parameters('targetSubscriptionIds')[copyIndex()]]",
+      "location": "[deployment().location]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "principalId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('resourceGroupName')), 'Microsoft.Resources/deployments', 'automation'), '2025-04-01').outputs.principalId.value]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2018-05-01/subscriptionDeploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.46.1.21595",
+              "templateHash": "10987973347124933000"
+            }
+          },
+          "parameters": {
+            "principalId": {
+              "type": "string"
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "name": "[guid(subscription().id, parameters('principalId'), '9980e02c-c2be-4d73-94e8-173b1dc7cf3c')]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '9980e02c-c2be-4d73-94e8-173b1dc7cf3c')]",
+                "principalId": "[parameters('principalId')]",
+                "principalType": "ServicePrincipal"
+              }
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('resourceGroupName')), 'Microsoft.Resources/deployments', 'automation')]"
+      ]
+    },
+    {
+      "condition": "[variables('nothingNamed')]",
       "type": "Microsoft.Resources/deployments",
       "apiVersion": "2025-04-01",
       "name": "role-vm-subscription",

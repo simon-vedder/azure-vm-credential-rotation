@@ -308,7 +308,9 @@ $steps['stopped-vm-is-skipped'] = {
 # run
 # ---------------------------------------------------------------------------
 
-$selected = if ($Step) { $steps.Keys | Where-Object { $_ -in $Step } } else { $steps.Keys }
+# pwsh -File hands a comma-separated value over as one string, so split it here.
+$wanted = @($Step | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$selected = if ($wanted) { $steps.Keys | Where-Object { $_ -in $wanted } } else { $steps.Keys }
 $results = foreach ($name in $selected) {
     Write-Host "`n### $name" -ForegroundColor Cyan
     $sw = [System.Diagnostics.Stopwatch]::StartNew()

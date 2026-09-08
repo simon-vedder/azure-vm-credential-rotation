@@ -54,3 +54,9 @@ a test does it on every push.
 
 The two paths start disagreeing about anything but syntax, or one of them stops being used. Deleting
 the Terraform is a one-commit change whenever it earns it.
+
+## Note, 2026-09-08
+
+Bicep is the path that gets verified live on every release; 0.3.0 was. Terraform is maintained
+and CI-validated against the same contract, and was last deployed live with 0.1.0. The tool page
+and the deploy documentation say so, rather than calling the two equivalent.
