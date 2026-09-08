@@ -7,6 +7,8 @@ Credential lifecycle for Azure VMs that **cannot use Windows LAPS or Entra login
 Rotates local administrator passwords and SSH keys on a schedule, and — optionally —
 within hours of somebody reading one out of Key Vault.
 
+**[Tool page](https://simonvedder.com/tools/azure-vm-credential-rotation/)** · **[Command reference](https://simonvedder.com/tools/azure-vm-credential-rotation/commands/)** · `Install-Module AzureVMCredentialRotation`
+
 ```
 Key Vault expiry date  ──┐
                          ├──▶  Automation runbook  ──▶  VMAccess extension  ──▶  VM
@@ -202,8 +204,14 @@ Invoke-CredentialRotation -VaultName kv-creds -WhatIf
 
 ## Status and limits
 
-Version 0.1.0, **verified end to end against a live Azure tenant**: deployed from the
-Terraform in this repository, rotating a real VM through a real automation account.
+Version 0.1.0, published as
+[`AzureVMCredentialRotation`](https://www.powershellgallery.com/packages/AzureVMCredentialRotation)
+on the PowerShell Gallery, and **verified end to end against a live Azure tenant**: deployed
+from the Terraform in this repository, rotating a real VM through a real automation account.
+
+The Bicep path was verified against ARM with `what-if` rather than a live deployment — the
+template is accepted and the module import resolves to the right Gallery package, but the first
+real `az deployment sub create` has not been run yet.
 
 Confirmed working on a Linux VM (Ubuntu 24.04):
 
