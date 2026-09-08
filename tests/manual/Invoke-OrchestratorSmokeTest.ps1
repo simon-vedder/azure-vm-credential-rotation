@@ -32,8 +32,16 @@
 .PARAMETER Step
     Names of steps to run. Default is all of them, in order.
 
+.PARAMETER Since
+    Lower bound for the workspace queries. Defaults to the moment the script started,
+    which is right for a full run; when repeating the custom-table step on its own, pass
+    the start of the run whose records you are looking for.
+
 .EXAMPLE
     ./tests/manual/Invoke-OrchestratorSmokeTest.ps1 -AutomationAccountName aa-credential-rotation -AutomationResourceGroupName rg-credential-rotation -VaultName kv-crot-abc123 -LabResourceGroupName rg-crot-lab
+
+.EXAMPLE
+    ./tests/manual/Invoke-OrchestratorSmokeTest.ps1 ... -Step records-land-in-the-custom-table -Since '2026-09-08T10:37:00Z'
 
 .INPUTS
     None
@@ -63,7 +71,8 @@ param(
     [string]$AdminUsername = 'labadmin',
     [string]$RunbookName = 'Invoke-CredentialRotation',
     [string]$HoldTagName = 'CredentialRotationHold',
-    [string[]]$Step
+    [string[]]$Step,
+    [datetime]$Since
 )
 
 $ErrorActionPreference = 'Stop'
@@ -171,8 +180,14 @@ function Get-WorkspaceId {
 }
 
 function Wait-Query {
-    # Log Analytics ingestion is minutes, not seconds. Poll until the query returns rows.
-    param([Parameter(Mandatory)][string]$Query, [int]$TimeoutMinutes = 25)
+    # Log Analytics ingestion is minutes, not seconds, and not ordered: a record written
+    # later can show up before one written earlier. So a step that expects several rows
+    # says what "enough" means through -Until, rather than taking the first row that lands.
+    param(
+        [Parameter(Mandatory)][string]$Query,
+        [scriptblock]$Until = { param($rows) $rows.Count -gt 0 },
+        [int]$TimeoutMinutes = 25
+    )
     $workspace = Get-WorkspaceId
     $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
     do {
@@ -184,7 +199,7 @@ function Wait-Query {
             Write-Host "  query not ready yet: $($_.Exception.Message.Split("`n")[0])" -ForegroundColor DarkGray
             $rows = @()
         }
-        if ($rows.Count -gt 0) { return $rows }
+        if (& $Until $rows) { return $rows }
         Write-Host "  waiting for ingestion ($([int]($deadline - (Get-Date)).TotalMinutes) min left)" -ForegroundColor DarkGray
         Start-Sleep -Seconds 60
     } while ((Get-Date) -lt $deadline)
@@ -197,7 +212,7 @@ function Wait-Query {
 
 $winPw = "$WindowsVMName-$AdminUsername-pw"
 $lnxPw = "$LinuxVMName-$AdminUsername-pw"
-$script:runStartedAt = (Get-Date).ToUniversalTime()
+$script:runStartedAt = if ($PSBoundParameters.ContainsKey('Since')) { $Since.ToUniversalTime() } else { (Get-Date).ToUniversalTime() }
 
 $steps = [ordered]@{}
 
@@ -255,7 +270,8 @@ $steps['hold-tag-takes-machine-out-of-scope'] = {
 
 $steps['records-land-in-the-custom-table'] = {
     $since = $script:runStartedAt.ToString('o')
-    $rows = Wait-Query -Query "CredentialRotation_CL | where TimeGenerated > datetime('$since') | where Result == 'Rotated' | project VMName, CredentialType, TriggerReason, TriggeredBy, NewSecretVersion | order by VMName asc"
+    $rows = Wait-Query -Query "CredentialRotation_CL | where TimeGenerated > datetime('$since') | where Result == 'Rotated' | project VMName, CredentialType, TriggerReason, TriggeredBy, NewSecretVersion | order by VMName asc" `
+        -Until { param($rows) $names = @($rows | ForEach-Object { $_.VMName }); $WindowsVMName -in $names -and $LinuxVMName -in $names }
     $vms = @($rows | ForEach-Object { $_.VMName } | Sort-Object -Unique)
     Assert-True ($WindowsVMName -in $vms -and $LinuxVMName -in $vms) "rows found for: $($vms -join ', ')"
     Assert-True (@($rows | Where-Object { $_.TriggeredBy -ne 'automation' }).Count -eq 0) 'every record from the runbook should say TriggeredBy=automation'

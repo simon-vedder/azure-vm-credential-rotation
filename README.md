@@ -272,34 +272,52 @@ Invoke-CredentialRotation -VaultName kv-creds -VMName jump-01 -WhatIf
 
 ## Status and limits
 
-Version 0.1.0, published as
+Version 0.3.0, published as
 [`AzureVMCredentialRotation`](https://www.powershellgallery.com/packages/AzureVMCredentialRotation)
-on the PowerShell Gallery, and **verified end to end against a live Azure tenant**: deployed
-from the Terraform in this repository, rotating a real VM through a real automation account.
+on the PowerShell Gallery, and **verified end to end against a live Azure tenant** on
+2026-09-08 — both ways in. The module was run from a workstation, and the runbook was deployed
+from `deploy/main.bicep` with the module imported from the Gallery. Every rotation below was
+checked on the guest, not only in the vault: Windows passwords with a local logon check, Linux
+passwords against the shadow hash, SSH keys by logging in. The lab and both test scripts are in
+the repository (`deploy/lab.bicep`, `tests/manual/`).
 
-The Bicep path was verified against ARM with `what-if` rather than a live deployment — the
-template is accepted and the module import resolves to the right Gallery package, but the first
-real `az deployment sub create` has not been run yet.
+From a workstation, on Windows Server 2022 and Ubuntu 24.04 with password authentication on
+(`Invoke-LabSmokeTest.ps1`, fourteen steps):
 
-Confirmed working on a Linux VM (Ubuntu 24.04):
+- password rotation on Windows; password and SSH key rotation together on Linux, both
+  promoted into Key Vault with a 90-day expiry
+- `-WhatIf` reports and touches nothing; a second run by name rotates again with reason
+  `Manual`; `-OnlyIfDue` leaves fresh credentials alone and `-ThresholdDays` makes them due;
+  `-SkipSshKeys`; `-SecretNameTemplate`, including the refusal of a template without `{vm}`
+- `Register-CredentialAccess` by pipeline pulls the expiry to now, and the next `-OnlyIfDue`
+  run rotates with reason `Access` and clears the marker
+- resume of an interrupted rotation from a staged value, including one whose staging secret
+  had expired two days earlier
+- a deallocated machine is skipped with nothing staged; an unknown name fails before anything
+  is touched
 
-- password and SSH key rotation, both promoted into Key Vault with a 90-day expiry
-- opt-in discovery — one tagged VM found, an untagged one beside it correctly ignored
-- resume after an interrupted rotation, replaying a staged value from 25 minutes earlier
-- access-driven rotation: a human read detected in `AZKVAuditLogs`, expiry pulled
-  forward, credential replaced on the following pass
-- rotation records reaching a custom table through the Logs Ingestion API (shipped by the
-  runbook from the records the module returns), and the
-  workbook query correlating reads with rotations
+Through the deployed runbook (`Invoke-OrchestratorSmokeTest.ps1`):
+
+- the Bicep deployment at subscription scope: automation account, module 0.3.0 from the
+  Gallery, runbook, schedule, the 15 variables, five role assignments, workspace, custom
+  table, ingestion endpoint and rule, diagnostic settings, workbook
+- a dry run reports the two tagged machines and what it would rotate, and changes nothing
+- a live run rotates only the credential that is due and leaves the other machine alone
+- the hold tag takes a machine out of scope while its credential is due
+- rotation records reach `CredentialRotation_CL` through the Logs Ingestion API
+- a human read of a secret is found in `AZKVAuditLogs`, the expiry pulled forward, and the
+  credential replaced in the same run
+- two jobs started together: one yields, one runs
 
 Still unverified, and worth knowing before you rely on them:
 
-- **Windows.** The code path is there and mirrors the Linux one, but the live test ran
-  on Linux only.
 - **Hardened images.** VMAccess behaviour against a CIS-baselined host is untested.
-- **Scale.** Tested with one VM. Discovery reads secret metadata per credential, so
-  several hundred machines is where ARM throttling would first show up.
+- **Scale.** Tested with two VMs. Discovery reads secret metadata per credential, so several
+  hundred machines is where ARM throttling would first show up.
 - **Multi-subscription.** Single subscription only so far.
+- **Terraform.** The Bicep path is the one exercised live with 0.3.0. The Terraform modules
+  deploy the same runbook from the committed build artefact and are validated in CI; their
+  last live deployment was with 0.1.0.
 
 Start in dry-run mode on machines you can afford to lock yourself out of.
 
