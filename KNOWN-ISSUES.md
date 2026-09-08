@@ -137,6 +137,13 @@ the shadow hash.
 
 ## Platform
 
+- *(observed)* The azurerm provider reads `azurerm_automation_runbook.runbook_type` back as
+  `PowerShell` for a runbook created as `PowerShell72`. Measured on 4.81.0 against a live
+  account: the ARM API returns `PowerShell72` at every api-version, Terraform state holds
+  `PowerShell`, and every plan therefore wants to replace the runbook and the job schedule
+  attached to it. `infra/modules/core` ignores the attribute; take that out when the provider
+  reads it correctly, and confirm with a second `terraform plan` that it stays clean.
+
 - *(observed)* Azure Automation keeps job-schedule ids after the automation account is
   deleted. A job schedule named `guid(automationAccount.id, …)` therefore collides when the
   same resource group and account names are deployed again: `A jobSchedule with same id
