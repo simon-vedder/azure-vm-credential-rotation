@@ -1,9 +1,27 @@
 # Changelog
 
-## [0.1.0] — 2026-08-01
+## [0.1.0] — 2026-09-08
 
-Initial release, verified end to end against a live Azure tenant. See the status
+First published release, verified end to end against a live Azure tenant. See the status
 section in the README for what that covered and what it did not.
+
+### Deployment and distribution
+
+- **Bicep, beside the Terraform rather than instead of it.** `deploy/` creates the same
+  resources `infra/` does, with rotation-after-use as a feature flag rather than a stacked
+  module, and a compiled `azuredeploy.json` so a deploy button has something to point at.
+  Verified with `az deployment sub what-if` against ARM: 33 changes, nothing created.
+- **The module is published to the PowerShell Gallery.** [ADR 0006](docs/decisions/0006-the-module-goes-to-the-gallery.md)
+  supersedes the gallery rejection in [ADR 0004](docs/decisions/0004-powershell-module-with-build-step.md),
+  whose premise — one consumer — no longer holds. The Bicep path imports the module by
+  version; the Terraform path still publishes the flattened runbook and needs no Gallery.
+- **The runbook wrapper works either way.** It imports the module only when its commands
+  are not already defined, so the flattened artefact is unaffected.
+- **A generated command reference** under `docs/commands`, built from the module's own help,
+  with CI failing when the two drift apart.
+- **A contract test** comparing the `CR_*` automation variables Terraform writes, Bicep
+  writes and the runbook reads, in every direction. Nothing in the type system connects
+  those three, and a mismatch there fails silently.
 
 ### Found by the live test
 
