@@ -10,8 +10,9 @@ function Invoke-CredentialRotation {
         keeping it out of here is what lets the same code run against one machine from a
         workstation and against a fleet on a schedule.
 
-        For each machine it works out what is due (missing, expiring or half-rotated),
-        rotates it, and writes a record of what happened.
+        Every machine handed in is rotated. Add -OnlyIfDue and the expiry date gets a vote
+        instead, which is what a scheduled pass wants. Whether you passed one name or two
+        hundred objects has nothing to do with it.
 
         Rotation after use is not handled here either. Register-CredentialAccess pulls the
         expiry date of a credential somebody read forward; this function then sees it as
@@ -19,20 +20,24 @@ function Invoke-CredentialRotation {
         to look.
 
     .PARAMETER VMName
-        Rotate this machine. The expiry threshold does not apply: you named it, so it is
-        rotated. This is the form to reach for from a workstation.
+        Rotate this machine. A convenience over -VM for the common case of one name; it
+        behaves identically otherwise.
 
     .PARAMETER ResourceGroupName
         Narrows -VMName when the same name exists more than once in the subscription.
         Without it, an ambiguous name is an error rather than a guess.
 
     .PARAMETER VM
-        Machines to process, as objects from Get-AzVM. The expiry threshold applies, so
-        only the ones that are actually due are touched. This is what an orchestrator
-        passes after it has selected them.
+        Machines to process, as objects from Get-AzVM. What an orchestrator passes after
+        it has selected them.
+
+    .PARAMETER OnlyIfDue
+        Rotate only what is missing, half-rotated or near expiry, instead of rotating
+        everything handed in. How you name the machines says nothing about this - a
+        scheduled pass sets it, a person at a prompt usually does not.
 
     .PARAMETER ThresholdDays
-        Rotate a credential whose expiry is this close. Ignored with -VMName.
+        How close to expiry counts as due. Only consulted with -OnlyIfDue.
 
     .EXAMPLE
         Invoke-CredentialRotation -VaultName kv-creds -VMName jump-01 -WhatIf
@@ -48,10 +53,18 @@ function Invoke-CredentialRotation {
 
     .EXAMPLE
         $vms = Get-AzVM | Where-Object { $_.Tags.CredentialRotation -eq 'enabled' }
+        Invoke-CredentialRotation -VaultName kv-creds -VM $vms -OnlyIfDue
+
+        What an orchestrator does: select the machines however you like, hand them over,
+        and ask for only the ones that are due. The tag here is the caller's policy, not
+        the module's.
+
+    .EXAMPLE
         Invoke-CredentialRotation -VaultName kv-creds -VM $vms
 
-        What an orchestrator does: select the machines however you like, then hand them
-        over. The tag here is the caller's policy, not the module's.
+        The same machines, all rotated, due or not. Naming machines and deciding whether
+        the expiry date gets a vote are two separate questions, so they are two separate
+        parameters.
 
     .OUTPUTS
         PSCustomObject summarising the run, with the individual records attached.
@@ -74,8 +87,10 @@ function Invoke-CredentialRotation {
         [Parameter(Mandatory, ParameterSetName = 'Machines')]
         [ValidateNotNullOrEmpty()][object[]]$VM,
 
-        # Only meaningful for a set of machines. A named machine is rotated regardless.
-        [Parameter(ParameterSetName = 'Machines')][ValidateRange(0, 3650)][int]$ThresholdDays = 14,
+        [switch]$OnlyIfDue,
+
+        # Only consulted with -OnlyIfDue.
+        [ValidateRange(0, 3650)][int]$ThresholdDays = 14,
 
         [ValidateRange(1, 3650)][int]$ValidityDays = 90,
 
@@ -92,6 +107,7 @@ function Invoke-CredentialRotation {
     )
 
     $startTime = Get-Date
+    # Only ever decides where the machines come from, never what happens to them.
     $named = $PSCmdlet.ParameterSetName -eq 'Named'
     $records = [System.Collections.Generic.List[object]]::new()
 
@@ -111,18 +127,25 @@ function Invoke-CredentialRotation {
     # --- the machines --------------------------------------------------------
     # Named or handed in, but always stated by the caller. Nothing here searches.
     $machines = if ($named) {
-        Write-RotationLog -Message "Vault: $VaultName | machine: $VMName | validity: $ValidityDays d | named, so the expiry threshold does not apply" -Level Info
         @(Resolve-TargetVM -Name $VMName -ResourceGroupName $ResourceGroupName)
     }
     else {
-        Write-RotationLog -Message "Vault: $VaultName | machines: $(@($VM).Count) | threshold: $ThresholdDays d | validity: $ValidityDays d" -Level Info
         @($VM)
     }
 
-    # --- what is due ---------------------------------------------------------
+    $scope = if ($OnlyIfDue) { "only what is due within $ThresholdDays d" } else { 'everything handed in' }
+    Write-RotationLog -Message "Vault: $VaultName | machines: $($machines.Count) | $scope | validity: $ValidityDays d" -Level Info
+
+    # A threshold with nothing to apply to is the kind of parameter that looks like it
+    # worked. Say so rather than ignoring it quietly.
+    if ($PSBoundParameters.ContainsKey('ThresholdDays') -and -not $OnlyIfDue) {
+        Write-RotationLog -Message '-ThresholdDays was given without -OnlyIfDue, so it has no effect: every machine handed in is being rotated.' -Level Warning
+    }
+
+    # --- what to rotate ------------------------------------------------------
     try {
         $candidates = Get-RotationCandidate -VaultName $VaultName -VM $machines `
-            -ThresholdDays $ThresholdDays -IgnoreExpiry:$named -SkipSshKeys:$SkipSshKeys
+            -OnlyIfDue:$OnlyIfDue -ThresholdDays $ThresholdDays -SkipSshKeys:$SkipSshKeys
     }
     catch {
         Write-RotationLog -Message "Could not work out what is due: $($_.Exception.Message)" -Level Error

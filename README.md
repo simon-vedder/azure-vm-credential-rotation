@@ -77,17 +77,21 @@ Invoke-CredentialRotation -VaultName kv-creds -VMName jump-01 -WhatIf
 Invoke-CredentialRotation -VaultName kv-creds -VMName jump-01
 ```
 
-`-VMName` ignores the expiry threshold: you asked for this machine, it gets rotated. Tags
-do not come into it at all — the module never reads one. If you want a set of machines
-instead, select them however you like and hand them over:
+Everything you hand it is rotated — you asked for this machine, it gets rotated. Tags do
+not come into it at all; the module never reads one. If you want a set of machines instead,
+select them however you like and hand them over:
 
 ```powershell
 $vms = Get-AzVM | Where-Object { $_.Tags.CredentialRotation -eq 'enabled' }
 Invoke-CredentialRotation -VaultName kv-creds -VM $vms
+
+# Or, the way a schedule wants it: only what is missing, half-rotated or near expiry.
+Invoke-CredentialRotation -VaultName kv-creds -VM $vms -OnlyIfDue
 ```
 
 That is exactly what the runbook does, and the tag in that line is your policy rather than
-the module's.
+the module's. Note that `-OnlyIfDue` is a question of its own: how you identify the
+machines says nothing about whether the expiry date gets a vote.
 
 Your own account needs Key Vault Secrets Officer on the vault and Virtual Machine
 Contributor on the VM. That is the difference from the scheduled form, where a managed

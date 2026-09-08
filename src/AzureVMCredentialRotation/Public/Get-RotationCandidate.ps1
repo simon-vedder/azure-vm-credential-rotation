@@ -17,17 +17,19 @@ function Get-RotationCandidate {
           Expiry        - the expiry date is within the threshold
           Access        - not detected here; access pulls the expiry date forward,
                           and this function then sees it as Expiry
-          Manual        - -IgnoreExpiry was set, so a healthy credential is replaced
-                          anyway
+          Manual        - nothing else applied, so the credential is replaced because
+                          the caller asked for this machine
 
     .PARAMETER VM
         The machines to examine. Objects from Get-AzVM, fetched by the caller.
 
-    .PARAMETER IgnoreExpiry
-        Treat a healthy, unexpired credential as due anyway, reported as Manual. This is
-        what somebody naming a single machine means: they asked for that machine, and a
-        threshold quietly deciding to do nothing would be the wrong answer. A scheduled
-        pass leaves it off and lets the expiry date decide.
+    .PARAMETER OnlyIfDue
+        Consult the expiry date instead of rotating regardless. Without it every machine
+        handed in is a candidate, which is what asking for a machine means. A scheduled
+        pass sets it, so it touches only what is missing, half-rotated or near expiry.
+
+    .PARAMETER ThresholdDays
+        How close to expiry counts as due. Only consulted with -OnlyIfDue.
 
         The last point is the design in one sentence: the expiry date is the only
         signal. Everything else writes to it.
@@ -42,9 +44,10 @@ function Get-RotationCandidate {
 
         [Parameter(Mandatory)][ValidateNotNullOrEmpty()][object[]]$VM,
 
-        [ValidateRange(0, 3650)][int]$ThresholdDays = 14,
+        [switch]$OnlyIfDue,
 
-        [switch]$IgnoreExpiry,
+        # Only consulted with -OnlyIfDue.
+        [ValidateRange(0, 3650)][int]$ThresholdDays = 14,
 
         # Linux VMs get an SSH key rotated unless this is set.
         [switch]$SkipSshKeys
@@ -105,9 +108,9 @@ function Get-RotationCandidate {
                     $reason = 'Missing'
                     Write-RotationLog -Message "Secret '$secretName' has no expiry date" -Level Warning -Scope $vm.Name
                 }
-                elseif ($IgnoreExpiry) {
-                    # Asked for explicitly: rotate it whatever the expiry says. Anything else
-                    # would silently do nothing for a machine somebody named.
+                elseif (-not $OnlyIfDue) {
+                    # The caller handed this machine over. Doing nothing because the date is
+                    # comfortable would be the wrong answer to a direct request.
                     $expiresOn = $secret.Secret.Expires.ToUniversalTime()
                     $reason = 'Manual'
                 }

@@ -26,9 +26,15 @@ The difference is not cosmetic. With policy inside the module:
 The module rotates the machines it is given. It does not search for them, does not read a
 tag, and has no opinion about which machines belong in scope.
 
-`Invoke-CredentialRotation` takes either `-VMName` (that one, now) or `-VM` (these, if they
-are due). Selection, hold, the subscription walk and the schedule for the access scan all
-move to the caller — which for the deployed form is the runbook wrapper.
+`Invoke-CredentialRotation` takes either `-VMName` (one, by name) or `-VM` (a set the
+caller selected). Selection, hold, the subscription walk and the schedule for the access
+scan all move to the caller — which for the deployed form is the runbook wrapper.
+
+Those two forms differ only in how machines are identified. Everything handed in is
+rotated; whether the expiry date gets a vote is `-OnlyIfDue`, a parameter of its own. The
+first attempt at this had `-VMName` imply "now" and `-VM` imply "if due", which is the same
+mistake in a smaller place: the shape of the input deciding what the call means. How you
+name machines and what should happen to them are two questions and get two parameters.
 
 ## Why the hold tag went too
 

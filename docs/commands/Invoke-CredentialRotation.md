@@ -8,8 +8,9 @@ to whatever is orchestrating - a runbook, a pipeline, or you at a prompt - and
 keeping it out of here is what lets the same code run against one machine from a
 workstation and against a fleet on a schedule.
 
-For each machine it works out what is due (missing, expiring or half-rotated),
-rotates it, and writes a record of what happened.
+Every machine handed in is rotated. Add -OnlyIfDue and the expiry date gets a vote
+instead, which is what a scheduled pass wants. Whether you passed one name or two
+hundred objects has nothing to do with it.
 
 Rotation after use is not handled here either. Register-CredentialAccess pulls the
 expiry date of a credential somebody read forward; this function then sees it as
@@ -19,9 +20,9 @@ to look.
 ## Syntax
 
 ```powershell
-Invoke-CredentialRotation -VaultName <string> -VMName <string> [-ResourceGroupName <string>] [-ValidityDays <int>] [-SkipSshKeys] [-RemovePriorSshKeys] [-ResetSshConfiguration] [-DataCollectionEndpoint <string>] [-DataCollectionRuleId <string>] [-StreamName <string>] [-TriggeredBy <string>] [-WhatIf] [-Confirm] [<CommonParameters>]
+Invoke-CredentialRotation -VaultName <string> -VMName <string> [-ResourceGroupName <string>] [-OnlyIfDue] [-ThresholdDays <int>] [-ValidityDays <int>] [-SkipSshKeys] [-RemovePriorSshKeys] [-ResetSshConfiguration] [-DataCollectionEndpoint <string>] [-DataCollectionRuleId <string>] [-StreamName <string>] [-TriggeredBy <string>] [-WhatIf] [-Confirm] [<CommonParameters>]
 
-Invoke-CredentialRotation -VaultName <string> -VM <Object[]> [-ThresholdDays <int>] [-ValidityDays <int>] [-SkipSshKeys] [-RemovePriorSshKeys] [-ResetSshConfiguration] [-DataCollectionEndpoint <string>] [-DataCollectionRuleId <string>] [-StreamName <string>] [-TriggeredBy <string>] [-WhatIf] [-Confirm] [<CommonParameters>]
+Invoke-CredentialRotation -VaultName <string> -VM <Object[]> [-OnlyIfDue] [-ThresholdDays <int>] [-ValidityDays <int>] [-SkipSshKeys] [-RemovePriorSshKeys] [-ResetSshConfiguration] [-DataCollectionEndpoint <string>] [-DataCollectionRuleId <string>] [-StreamName <string>] [-TriggeredBy <string>] [-WhatIf] [-Confirm] [<CommonParameters>]
 ```
 
 ## Parameters
@@ -29,10 +30,11 @@ Invoke-CredentialRotation -VaultName <string> -VM <Object[]> [-ThresholdDays <in
 | Name | Type | Required | Pipeline | Default | Description |
 |---|---|---|---|---|---|
 | `-VaultName` | String | yes | no |  |  |
-| `-VMName` | String | yes | no |  | Rotate this machine. The expiry threshold does not apply: you named it, so it is rotated. This is the form to reach for from a workstation. |
+| `-VMName` | String | yes | no |  | Rotate this machine. A convenience over -VM for the common case of one name; it behaves identically otherwise. |
 | `-ResourceGroupName` | String | no | no |  | Narrows -VMName when the same name exists more than once in the subscription. Without it, an ambiguous name is an error rather than a guess. |
-| `-VM` | Object[] | yes | no |  | Machines to process, as objects from Get-AzVM. The expiry threshold applies, so only the ones that are actually due are touched. This is what an orchestrator passes after it has selected them. |
-| `-ThresholdDays` | Int32 | no | no | 14 | Rotate a credential whose expiry is this close. Ignored with -VMName. |
+| `-VM` | Object[] | yes | no |  | Machines to process, as objects from Get-AzVM. What an orchestrator passes after it has selected them. |
+| `-OnlyIfDue` | SwitchParameter | no | no |  | Rotate only what is missing, half-rotated or near expiry, instead of rotating everything handed in. How you name the machines says nothing about this - a scheduled pass sets it, a person at a prompt usually does not. |
+| `-ThresholdDays` | Int32 | no | no | 14 | How close to expiry counts as due. Only consulted with -OnlyIfDue. |
 | `-ValidityDays` | Int32 | no | no | 90 |  |
 | `-SkipSshKeys` | SwitchParameter | no | no |  |  |
 | `-RemovePriorSshKeys` | SwitchParameter | no | no |  |  |
@@ -68,11 +70,22 @@ exist yet, so this is also how a machine is onboarded by hand.
 
 ```powershell
 $vms = Get-AzVM | Where-Object { $_.Tags.CredentialRotation -eq 'enabled' }
+Invoke-CredentialRotation -VaultName kv-creds -VM $vms -OnlyIfDue
+```
+
+What an orchestrator does: select the machines however you like, hand them over,
+and ask for only the ones that are due. The tag here is the caller's policy, not
+the module's.
+
+### Example 4
+
+```powershell
 Invoke-CredentialRotation -VaultName kv-creds -VM $vms
 ```
 
-What an orchestrator does: select the machines however you like, then hand them
-over. The tag here is the caller's policy, not the module's.
+The same machines, all rotated, due or not. Naming machines and deciding whether
+the expiry date gets a vote are two separate questions, so they are two separate
+parameters.
 
 ## Output
 

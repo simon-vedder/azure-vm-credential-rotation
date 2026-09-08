@@ -431,20 +431,31 @@ Describe 'Get-RotationCandidate takes the machines it is given' {
     }
 
     It 'does not care whether the machine carries any tag' {
-        $result = @(Get-RotationCandidate -VaultName 'kv' -VM $script:LinuxVM -IgnoreExpiry)
+        $result = @(Get-RotationCandidate -VaultName 'kv' -VM $script:LinuxVM)
         $result.Count | Should -BeGreaterThan 0
         $result[0].VM.Name | Should -Be 'jump-01'
     }
 
-    It 'leaves a healthy credential alone by default' {
-        # 300 days from expiry: an orchestrated pass has nothing to do here.
-        @(Get-RotationCandidate -VaultName 'kv' -VM $script:LinuxVM) | Should -BeNullOrEmpty
+    It 'rotates a healthy credential by default, because it was handed one' {
+        # 300 days from expiry. Doing nothing would be the wrong answer to a direct request.
+        $result = @(Get-RotationCandidate -VaultName 'kv' -VM $script:LinuxVM)
+        $result[0].Reason | Should -Be 'Manual'
     }
 
-    It 'reports Manual, not Expiry, when told to ignore the expiry date' {
-        # What naming a single machine means: the threshold must not silently do nothing.
-        $result = @(Get-RotationCandidate -VaultName 'kv' -VM $script:LinuxVM -IgnoreExpiry)
-        $result[0].Reason | Should -Be 'Manual'
+    It 'leaves a healthy credential alone with -OnlyIfDue' {
+        @(Get-RotationCandidate -VaultName 'kv' -VM $script:LinuxVM -OnlyIfDue) | Should -BeNullOrEmpty
+    }
+
+    It 'reports Expiry, not Manual, when it is genuinely near expiry' {
+        Mock Get-RotationSecret {
+            if ($Name -like '*pending*') { return [pscustomobject]@{ Exists = $false; Secret = $null } }
+            [pscustomobject]@{
+                Exists = $true
+                Secret = [pscustomobject]@{ Version = 'v1'; Enabled = $true; Expires = (Get-Date).ToUniversalTime().AddDays(3); Tags = @{} }
+            }
+        }
+        $result = @(Get-RotationCandidate -VaultName 'kv' -VM $script:LinuxVM -OnlyIfDue)
+        $result[0].Reason | Should -Be 'Expiry'
     }
 
     It 'still reports a missing secret as Missing' {
@@ -458,7 +469,7 @@ Describe 'Get-RotationCandidate takes the machines it is given' {
         $held.Tags = @{ CredentialRotationHold = 'true' }
         # The orchestrator filters these out before calling. The module rotating it anyway
         # is correct: it was handed a machine and told to look at it.
-        @(Get-RotationCandidate -VaultName 'kv' -VM $held -IgnoreExpiry).Count | Should -BeGreaterThan 0
+        @(Get-RotationCandidate -VaultName 'kv' -VM $held).Count | Should -BeGreaterThan 0
     }
 }
 
@@ -512,5 +523,12 @@ Describe 'The module holds no selection policy' {
         $runbook | Should -Match 'Get-AzVM'
         $runbook | Should -Match 'EnableTagName'
         $runbook | Should -Match 'HoldTagName'
+    }
+
+    It 'and the scheduled pass asks for due credentials only' {
+        # The module rotates whatever it is handed. Without this switch a six-hourly job
+        # would re-roll every credential in the estate, four times a day, quietly.
+        $runbook = Get-Content -Path $script:RunbookFile -Raw
+        $runbook | Should -Match 'OnlyIfDue\s*=\s*\$true'
     }
 }
