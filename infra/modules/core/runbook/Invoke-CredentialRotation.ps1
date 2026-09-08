@@ -40,6 +40,51 @@
     CR_AccessRotationEnabled. Deploy neither and the runbook falls back to plain
     expiry-driven rotation.
 
+.PARAMETER VaultName
+    The Key Vault holding the credentials. Normally left unset so the job takes it from
+    the automation variable CR_VaultName that the deployment writes; pass it to point one
+    manual run at a different vault.
+
+.PARAMETER SubscriptionId
+    The subscriptions to walk, comma-separated. Unset means the automation variable
+    CR_SubscriptionId, and unset there means the subscription the automation account
+    itself lives in. Naming subscriptions is what makes a cross-subscription estate work:
+    the identity's role assignments still have to reach them.
+
+.PARAMETER ThresholdDays
+    How close to expiry counts as due, defaulting to fourteen through CR_ThresholdDays.
+    Read together with the schedule: a machine is only seen when a job runs, so the
+    threshold has to be comfortably wider than the interval between runs.
+
+.PARAMETER ValidityDays
+    How far ahead a new secret's expiry date is set, defaulting to ninety through
+    CR_ValidityDays. Since the expiry date is the only signal, this is the rotation
+    interval. A STIG-hardened Linux image enforces a shorter maximum password age, so
+    match it there rather than letting the guest and the vault disagree.
+
+.PARAMETER EnableTagName
+    The VM tag that opts a machine in, defaulting to CredentialRotation through
+    CR_EnableTagName. This is the orchestrator's vocabulary and nothing else reads it -
+    the module is handed machines, never a tag name.
+
+.PARAMETER EnableTagValue
+    The value that tag must carry, defaulting to enabled through CR_EnableTagValue. A
+    machine tagged with anything else is out of scope, which is how a fleet is onboarded
+    in batches rather than all at once.
+
+.PARAMETER SkipSshKeys
+    Rotates passwords only and leaves Linux SSH keys alone. Set it through
+    CR_SkipSshKeys where the keys belong to configuration management.
+
+.PARAMETER RemovePriorSshKeys
+    Off by default, and worth leaving off: the VMAccess extension can wipe every entry in
+    authorized_keys, which takes out colleagues, configuration management and backup
+    agents along with the key being replaced.
+
+.PARAMETER ResetSshConfiguration
+    Off by default: VMAccess can restore sshd configuration to its default, silently
+    undoing hardening on a CIS-baselined host.
+
 .PARAMETER SecretNameTemplate
     How secret names are built, from {vm}, {user}, {rg} and {kind}. Defaults to the shape
     this tool has always used. Set it where two machines could share a name, or where the
@@ -57,6 +102,26 @@
     job schedule's parameters because Automation ignores a PUT on a schedule link that
     already exists - a redeployment with dryRun=false would report success and change
     nothing.
+
+.EXAMPLE
+    Start-AzAutomationRunbook -AutomationAccountName aa-credrotation -ResourceGroupName rg-credrotation -Name Invoke-CredentialRotationRunbook -Parameters @{ DryRun = $true }
+
+    The first run after a deployment. Reports what it would replace across every tagged
+    machine and changes nothing. Read one of these before turning the schedule loose.
+
+.EXAMPLE
+    Set-AzAutomationVariable -AutomationAccountName aa-credrotation -ResourceGroupName rg-credrotation -Name CR_DryRun -Value 'false' -Encrypted $false
+
+    How the scheduled job leaves dry-run mode. The schedule carries no parameters on
+    purpose: Automation ignores a PUT on a job schedule that already exists, so a
+    redeployment with dryRun=false would report success and change nothing.
+
+.EXAMPLE
+    Start-AzAutomationRunbook -AutomationAccountName aa-credrotation -ResourceGroupName rg-credrotation -Name Invoke-CredentialRotationRunbook -Parameters @{ SubscriptionId = '<sub-a>,<sub-b>'; DryRun = $true }
+
+    A cross-subscription pass, forced for one run. Both subscriptions have to be within
+    reach of the managed identity's role assignments; naming one it cannot see produces a
+    permission error rather than an empty result.
 
 .NOTES
     Requires the automation account's managed identity to hold:
@@ -745,6 +810,13 @@ function Get-RotationCandidate {
           Manual        - nothing else applied, so the credential is replaced because
                           the caller asked for this machine
 
+        Access is the one worth reading twice, because it is the design in one sentence:
+        the expiry date is the only signal, and everything else writes to it.
+
+    .PARAMETER VaultName
+        The Key Vault holding the credentials. Only read here: this function decides what
+        is due, it never writes.
+
     .PARAMETER VM
         The machines to examine. Objects from Get-AzVM, fetched by the caller.
 
@@ -756,12 +828,32 @@ function Get-RotationCandidate {
     .PARAMETER ThresholdDays
         How close to expiry counts as due. Only consulted with -OnlyIfDue.
 
+    .PARAMETER SkipSshKeys
+        Leaves SSH keys out of the answer. Without it a Linux machine yields a key
+        candidate as well as a password one.
+
     .PARAMETER SecretNameTemplate
         How secret names are built from {vm}, {user}, {rg} and {kind}. Must match what was
         used when the secrets were written, or nothing will be found.
 
-        The last point is the design in one sentence: the expiry date is the only
-        signal. Everything else writes to it.
+    .EXAMPLE
+        Get-RotationCandidate -VaultName kv-creds -VM (Get-AzVM -ResourceGroupName rg-dmz)
+
+        Every credential on every machine in that resource group, because asking for a
+        machine is itself the reason to rotate it. Reason comes back as Manual.
+
+    .EXAMPLE
+        Get-RotationCandidate -VaultName kv-creds -VM $vms -OnlyIfDue -ThresholdDays 14
+
+        What a scheduled pass asks: only what is missing, half-rotated or within
+        fourteen days of expiry. Reason distinguishes Missing, Expiry and ResumePending.
+
+    .EXAMPLE
+        Get-RotationCandidate -VaultName kv-creds -VM $vms -OnlyIfDue |
+            Format-Table VM, CredentialType, Reason, ExpiresOn
+
+        Dry inspection before a first run over an estate. Nothing is changed by asking,
+        so this is the cheapest way to see how much work the next rotation would be.
 
     .OUTPUTS
         PSCustomObject with VM, CredentialType, Reason, SecretName, ExpiresOn.
@@ -900,6 +992,10 @@ function Invoke-CredentialRotation {
         ordinary ageing. One signal, one code path - and the orchestrator decides how often
         to look.
 
+    .PARAMETER VaultName
+        The Key Vault the credentials live in. The one thing this function must be told
+        that it cannot work out from the machines themselves.
+
     .PARAMETER VMName
         Rotate this machine. A convenience over -VM for the common case of one name; it
         behaves identically otherwise.
@@ -919,6 +1015,28 @@ function Invoke-CredentialRotation {
 
     .PARAMETER ThresholdDays
         How close to expiry counts as due. Only consulted with -OnlyIfDue.
+
+    .PARAMETER ValidityDays
+        How far ahead each new secret's expiry date is set. Since the expiry date is the
+        only signal, this is the rotation interval: ninety days here means a credential
+        comes back around in ninety days.
+
+    .PARAMETER SkipSshKeys
+        Rotates passwords only, leaving Linux SSH keys alone. Useful while onboarding an
+        estate where the keys are managed by something else.
+
+    .PARAMETER RemovePriorSshKeys
+        Passed through to Update-VMCredential, and off by default for the reason given
+        there: VMAccess can wipe every entry in authorized_keys, colleagues and agents
+        included.
+
+    .PARAMETER ResetSshConfiguration
+        Passed through to Update-VMCredential, and off by default: VMAccess can restore
+        sshd configuration to its default and undo hardening on a baselined host.
+
+    .PARAMETER TriggeredBy
+        Who or what asked for this run - a runbook job id, a person, a change ticket.
+        Recorded on every record the run produces, and never interpreted.
 
     .PARAMETER SecretNameTemplate
         How secret names are built from {vm}, {user}, {rg} and {kind}. Change it to fit a
@@ -1114,6 +1232,10 @@ function Register-CredentialAccess {
         secret version and it does not read the value, so it neither disturbs
         consumers nor pollutes the audit trail this function depends on.
 
+    .PARAMETER VaultName
+        The vault holding the secret. Only its expiry date is touched; the value is
+        never read, which is what keeps this function out of its own audit trail.
+
     .PARAMETER SecretName
         The secret that was read. Accepts pipeline input by property name, so the
         result of the audit-log query pipes straight in.
@@ -1131,6 +1253,9 @@ function Register-CredentialAccess {
 
     .EXAMPLE
         Register-CredentialAccess -VaultName kv -SecretName vm01-azureuser-pw -AccessedBy alice@contoso.com
+
+        One read, handled by hand. The expiry date moves to now plus the grace period
+        and the next scheduled run replaces the credential as ordinary ageing.
 
     .EXAMPLE
         $reads | Register-CredentialAccess -VaultName kv -GracePeriodHours 8 -WhatIf
@@ -1239,6 +1364,38 @@ function Update-VMCredential {
         The staging secret is overwritten rather than deleted or disabled - see
         Close-PendingCredential for why both of those fail against a real vault.
 
+    .PARAMETER VaultName
+        The Key Vault the new value is written to. Written before the machine is touched,
+        which is the whole point of the order above.
+
+    .PARAMETER VM
+        The machine to change, as an object from Get-AzVM. One machine, not a list: the
+        fan-out belongs to Invoke-CredentialRotation.
+
+    .PARAMETER CredentialType
+        Password for the local administrator account, or SSHKey for a new key pair on a
+        Linux machine. One credential per call, so a machine with both is two calls.
+
+    .PARAMETER ValidityDays
+        How far ahead the new secret's expiry date is set. That date is the only thing
+        that brings the credential back for rotation, so it is the rotation interval in
+        everything but name. Note that a STIG-hardened Linux image enforces a shorter
+        maximum password age than the ninety-day default.
+
+    .PARAMETER TriggerReason
+        Why this rotation is happening, recorded on the run. Get-RotationCandidate works
+        it out; pass it through rather than inventing one, or the audit trail stops
+        matching what actually drove the change.
+
+    .PARAMETER TriggeredBy
+        Who or what asked for it - a runbook job id, a person, a change ticket. Free text,
+        recorded verbatim, never interpreted.
+
+    .PARAMETER SecretNameTemplate
+        How the secret name is built from {vm}, {user}, {rg} and {kind}. Must match what
+        was used when the secret was written, or this call stages a new secret beside the
+        real one instead of replacing it.
+
     .PARAMETER RemovePriorSshKeys
         Defaults to false, deliberately. The VMAccess extension can wipe every entry
         in authorized_keys, which takes out colleagues, configuration management and
@@ -1248,6 +1405,26 @@ function Update-VMCredential {
     .PARAMETER ResetSshConfiguration
         Defaults to false, deliberately. VMAccess can restore sshd configuration to
         its default, which silently undoes hardening on a CIS-baselined host.
+
+    .EXAMPLE
+        $vm = Get-AzVM -ResourceGroupName rg-dmz -Name jump-01
+        Update-VMCredential -VaultName kv-creds -VM $vm -CredentialType Password -WhatIf
+
+        What one rotation would do, without doing it. ShouldProcess is asked per
+        credential, so a dry run over a fleet still reports every machine separately.
+
+    .EXAMPLE
+        $vm = Get-AzVM -ResourceGroupName rg-dmz -Name jump-01
+        Update-VMCredential -VaultName kv-creds -VM $vm -CredentialType Password -Confirm:$false
+
+        Replaces the local administrator password now and stores it with the default
+        ninety-day expiry. ConfirmImpact is High, so without -Confirm:$false this prompts.
+
+    .EXAMPLE
+        Update-VMCredential -VaultName kv-creds -VM $linuxVm -CredentialType SSHKey -TriggerReason Access -TriggeredBy 'runbook:8f2c' -Confirm:$false
+
+        A key replaced because somebody read the old one. The reason and the caller are
+        recorded on the run; they change nothing about how the rotation is performed.
 
     .OUTPUTS
         PSCustomObject describing the outcome.
