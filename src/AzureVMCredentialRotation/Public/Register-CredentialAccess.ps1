@@ -26,6 +26,10 @@ function Register-CredentialAccess {
         secret version and it does not read the value, so it neither disturbs
         consumers nor pollutes the audit trail this function depends on.
 
+    .PARAMETER VaultName
+        The vault holding the secret. Only its expiry date is touched; the value is
+        never read, which is what keeps this function out of its own audit trail.
+
     .PARAMETER SecretName
         The secret that was read. Accepts pipeline input by property name, so the
         result of the audit-log query pipes straight in.
@@ -43,6 +47,9 @@ function Register-CredentialAccess {
 
     .EXAMPLE
         Register-CredentialAccess -VaultName kv -SecretName vm01-azureuser-pw -AccessedBy alice@contoso.com
+
+        One read, handled by hand. The expiry date moves to now plus the grace period
+        and the next scheduled run replaces the credential as ordinary ageing.
 
     .EXAMPLE
         $reads | Register-CredentialAccess -VaultName kv -GracePeriodHours 8 -WhatIf

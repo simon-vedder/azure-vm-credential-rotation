@@ -29,18 +29,18 @@ Invoke-CredentialRotation -VaultName <string> -VM <Object[]> [-OnlyIfDue] [-Thre
 
 | Name | Type | Required | Pipeline | Default | Description |
 |---|---|---|---|---|---|
-| `-VaultName` | String | yes | no |  |  |
+| `-VaultName` | String | yes | no |  | The Key Vault the credentials live in. The one thing this function must be told that it cannot work out from the machines themselves. |
 | `-VMName` | String | yes | no |  | Rotate this machine. A convenience over -VM for the common case of one name; it behaves identically otherwise. |
 | `-ResourceGroupName` | String | no | no |  | Narrows -VMName when the same name exists more than once in the subscription. Without it, an ambiguous name is an error rather than a guess. |
 | `-VM` | Object[] | yes | no |  | Machines to process, as objects from Get-AzVM. What an orchestrator passes after it has selected them. |
 | `-OnlyIfDue` | SwitchParameter | no | no |  | Rotate only what is missing, half-rotated or near expiry, instead of rotating everything handed in. How you name the machines says nothing about this - a scheduled pass sets it, a person at a prompt usually does not. |
 | `-ThresholdDays` | Int32 | no | no | 14 | How close to expiry counts as due. Only consulted with -OnlyIfDue. |
-| `-ValidityDays` | Int32 | no | no | 90 |  |
-| `-SkipSshKeys` | SwitchParameter | no | no |  |  |
-| `-RemovePriorSshKeys` | SwitchParameter | no | no |  |  |
-| `-ResetSshConfiguration` | SwitchParameter | no | no |  |  |
+| `-ValidityDays` | Int32 | no | no | 90 | How far ahead each new secret's expiry date is set. Since the expiry date is the only signal, this is the rotation interval: ninety days here means a credential comes back around in ninety days. |
+| `-SkipSshKeys` | SwitchParameter | no | no |  | Rotates passwords only, leaving Linux SSH keys alone. Useful while onboarding an estate where the keys are managed by something else. |
+| `-RemovePriorSshKeys` | SwitchParameter | no | no |  | Passed through to Update-VMCredential, and off by default for the reason given there: VMAccess can wipe every entry in authorized_keys, colleagues and agents included. |
+| `-ResetSshConfiguration` | SwitchParameter | no | no |  | Passed through to Update-VMCredential, and off by default: VMAccess can restore sshd configuration to its default and undo hardening on a baselined host. |
 | `-SecretNameTemplate` | String | no | no | {vm}-{user}-{kind} | How secret names are built from {vm}, {user}, {rg} and {kind}. Change it to fit a vault that already has a naming convention; keep it the same for the life of a secret. Use {rg} where two machines could share a name - a VM name is not unique in a subscription, and the default template would put both on one secret. |
-| `-TriggeredBy` | String | no | no |  |  |
+| `-TriggeredBy` | String | no | no |  | Who or what asked for this run - a runbook job id, a person, a change ticket. Recorded on every record the run produces, and never interpreted. |
 
 Supports `-WhatIf` and `-Confirm`.
 

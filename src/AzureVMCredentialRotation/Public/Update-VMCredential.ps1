@@ -27,6 +27,38 @@ function Update-VMCredential {
         The staging secret is overwritten rather than deleted or disabled - see
         Close-PendingCredential for why both of those fail against a real vault.
 
+    .PARAMETER VaultName
+        The Key Vault the new value is written to. Written before the machine is touched,
+        which is the whole point of the order above.
+
+    .PARAMETER VM
+        The machine to change, as an object from Get-AzVM. One machine, not a list: the
+        fan-out belongs to Invoke-CredentialRotation.
+
+    .PARAMETER CredentialType
+        Password for the local administrator account, or SSHKey for a new key pair on a
+        Linux machine. One credential per call, so a machine with both is two calls.
+
+    .PARAMETER ValidityDays
+        How far ahead the new secret's expiry date is set. That date is the only thing
+        that brings the credential back for rotation, so it is the rotation interval in
+        everything but name. Note that a STIG-hardened Linux image enforces a shorter
+        maximum password age than the ninety-day default.
+
+    .PARAMETER TriggerReason
+        Why this rotation is happening, recorded on the run. Get-RotationCandidate works
+        it out; pass it through rather than inventing one, or the audit trail stops
+        matching what actually drove the change.
+
+    .PARAMETER TriggeredBy
+        Who or what asked for it - a runbook job id, a person, a change ticket. Free text,
+        recorded verbatim, never interpreted.
+
+    .PARAMETER SecretNameTemplate
+        How the secret name is built from {vm}, {user}, {rg} and {kind}. Must match what
+        was used when the secret was written, or this call stages a new secret beside the
+        real one instead of replacing it.
+
     .PARAMETER RemovePriorSshKeys
         Defaults to false, deliberately. The VMAccess extension can wipe every entry
         in authorized_keys, which takes out colleagues, configuration management and
@@ -36,6 +68,26 @@ function Update-VMCredential {
     .PARAMETER ResetSshConfiguration
         Defaults to false, deliberately. VMAccess can restore sshd configuration to
         its default, which silently undoes hardening on a CIS-baselined host.
+
+    .EXAMPLE
+        $vm = Get-AzVM -ResourceGroupName rg-dmz -Name jump-01
+        Update-VMCredential -VaultName kv-creds -VM $vm -CredentialType Password -WhatIf
+
+        What one rotation would do, without doing it. ShouldProcess is asked per
+        credential, so a dry run over a fleet still reports every machine separately.
+
+    .EXAMPLE
+        $vm = Get-AzVM -ResourceGroupName rg-dmz -Name jump-01
+        Update-VMCredential -VaultName kv-creds -VM $vm -CredentialType Password -Confirm:$false
+
+        Replaces the local administrator password now and stores it with the default
+        ninety-day expiry. ConfirmImpact is High, so without -Confirm:$false this prompts.
+
+    .EXAMPLE
+        Update-VMCredential -VaultName kv-creds -VM $linuxVm -CredentialType SSHKey -TriggerReason Access -TriggeredBy 'runbook:8f2c' -Confirm:$false
+
+        A key replaced because somebody read the old one. The reason and the caller are
+        recorded on the run; they change nothing about how the rotation is performed.
 
     .OUTPUTS
         PSCustomObject describing the outcome.
