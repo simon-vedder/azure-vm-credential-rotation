@@ -286,8 +286,9 @@ the repository (`deploy/lab.bicep`, `tests/manual/`); what they found that was n
 [KNOWN-ISSUES](KNOWN-ISSUES.md).
 
 From a workstation (`Invoke-LabSmokeTest.ps1`, fourteen steps), on Windows Server 2022 and
-Ubuntu 24.04 with password authentication on, and again on the **CIS Level 1 marketplace
-images** of both:
+Ubuntu 24.04 with password authentication on, and again on four hardened marketplace images:
+**CIS Level 1** for both, **CIS Level 2** for Windows Server 2022, and the **CIS STIG** build of
+Ubuntu 24.04, the strictest of them:
 
 - password rotation on Windows; password and SSH key rotation together on Linux, both
   promoted into Key Vault with a 90-day expiry
@@ -320,6 +321,8 @@ account in one subscription and machines in two:
   credential replaced in the same run
 - the machine in the second subscription is found, rotated, and accepts the password
 - two jobs started together: one yields, one runs
+- a fleet of twelve machines across two regions rotated in one job: 24 of 24 credentials, no
+  failures, which is where the throughput figures below come from
 
 Still unverified, and worth knowing before you rely on them:
 
