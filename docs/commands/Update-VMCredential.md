@@ -31,6 +31,12 @@ Close-PendingCredential for why both of those fail against a real vault.
 Update-VMCredential [-VaultName] <string> [-VM] <Object> [-CredentialType] <string> [[-ValidityDays] <int>] [[-TriggerReason] <string>] [[-TriggeredBy] <string>] [[-SecretNameTemplate] <string>] [-RemovePriorSshKeys] [-ResetSshConfiguration] [-WhatIf] [-Confirm] [<CommonParameters>]
 ```
 
+## Requirements and notes
+
+RequiredPermissions: Key Vault Secrets Officer on the vault, and Virtual Machine Contributor
+on the machine. The VM permission is needed because the new credential is applied through the
+VMAccess extension, which means extension installation rights on that machine.
+
 ## Parameters
 
 | Name | Type | Required | Pipeline | Default | Description |

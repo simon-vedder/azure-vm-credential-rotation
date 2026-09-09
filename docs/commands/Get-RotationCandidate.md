@@ -27,6 +27,11 @@ the expiry date is the only signal, and everything else writes to it.
 Get-RotationCandidate [-VaultName] <string> [-VM] <Object[]> [[-ThresholdDays] <int>] [[-SecretNameTemplate] <string>] [-OnlyIfDue] [-SkipSshKeys] [<CommonParameters>]
 ```
 
+## Requirements and notes
+
+RequiredPermissions: Key Vault Secrets User on the vault. This function only reads secret
+metadata to decide what is due; it never writes and never touches a VM.
+
 ## Parameters
 
 | Name | Type | Required | Pipeline | Default | Description |

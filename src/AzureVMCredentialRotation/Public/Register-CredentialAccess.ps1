@@ -57,6 +57,11 @@ function Register-CredentialAccess {
         Whatever produced $reads - the KQL in queries/, a SIEM export, a ticket - as
         long as each object carries SecretName and AccessedBy.
 
+    .NOTES
+        RequiredPermissions: Key Vault Secrets Officer on the vault. Only the expiry date is written;
+        the value is never read, which is what keeps this function out of its own audit trail. No VM
+        permission at all - it does not touch machines.
+
     .OUTPUTS
         PSCustomObject per secret, saying whether its expiry was moved.
     #>

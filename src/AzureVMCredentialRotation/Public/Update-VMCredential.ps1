@@ -89,6 +89,11 @@ function Update-VMCredential {
         A key replaced because somebody read the old one. The reason and the caller are
         recorded on the run; they change nothing about how the rotation is performed.
 
+    .NOTES
+        RequiredPermissions: Key Vault Secrets Officer on the vault, and Virtual Machine Contributor
+        on the machine. The VM permission is needed because the new credential is applied through the
+        VMAccess extension, which means extension installation rights on that machine.
+
     .OUTPUTS
         PSCustomObject describing the outcome.
     #>

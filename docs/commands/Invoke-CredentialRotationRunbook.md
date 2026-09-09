@@ -36,11 +36,12 @@ expiry-driven rotation.
 
 ## Requirements and notes
 
-Requires the automation account's managed identity to hold:
-  Key Vault Secrets Officer   on the vault
-  Virtual Machine Contributor on the VM scopes
-  Log Analytics Reader        on the workspace   (only for access-driven rotation)
-  Monitoring Metrics Publisher on the DCR        (only for audit records)
+RequiredPermissions: the automation account's system-assigned identity needs Key Vault Secrets
+Officer on the vault, Virtual Machine Contributor on the VM scopes, and Automation Job Operator
+on the automation account itself. Access-driven rotation adds Log Analytics Reader on the
+workspace; the audit trail adds Monitoring Metrics Publisher on the data collection rule. The
+deployment assigns all of them, so running it needs the right to create role assignments in
+every scope you name.
 
 ## Parameters
 

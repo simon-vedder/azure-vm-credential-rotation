@@ -30,6 +30,12 @@ consumers nor pollutes the audit trail this function depends on.
 Register-CredentialAccess [-VaultName] <string> [-SecretName] <string> [-AccessedBy] <string> [[-AccessedAt] <datetime>] [[-GracePeriodHours] <int>] [-WhatIf] [-Confirm] [<CommonParameters>]
 ```
 
+## Requirements and notes
+
+RequiredPermissions: Key Vault Secrets Officer on the vault. Only the expiry date is written;
+the value is never read, which is what keeps this function out of its own audit trail. No VM
+permission at all - it does not touch machines.
+
 ## Parameters
 
 | Name | Type | Required | Pipeline | Default | Description |
