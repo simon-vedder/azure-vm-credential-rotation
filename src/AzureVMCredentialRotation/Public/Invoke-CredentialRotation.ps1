@@ -19,6 +19,10 @@ function Invoke-CredentialRotation {
         ordinary ageing. One signal, one code path - and the orchestrator decides how often
         to look.
 
+    .PARAMETER VaultName
+        The Key Vault the credentials live in. The one thing this function must be told
+        that it cannot work out from the machines themselves.
+
     .PARAMETER VMName
         Rotate this machine. A convenience over -VM for the common case of one name; it
         behaves identically otherwise.
@@ -38,6 +42,28 @@ function Invoke-CredentialRotation {
 
     .PARAMETER ThresholdDays
         How close to expiry counts as due. Only consulted with -OnlyIfDue.
+
+    .PARAMETER ValidityDays
+        How far ahead each new secret's expiry date is set. Since the expiry date is the
+        only signal, this is the rotation interval: ninety days here means a credential
+        comes back around in ninety days.
+
+    .PARAMETER SkipSshKeys
+        Rotates passwords only, leaving Linux SSH keys alone. Useful while onboarding an
+        estate where the keys are managed by something else.
+
+    .PARAMETER RemovePriorSshKeys
+        Passed through to Update-VMCredential, and off by default for the reason given
+        there: VMAccess can wipe every entry in authorized_keys, colleagues and agents
+        included.
+
+    .PARAMETER ResetSshConfiguration
+        Passed through to Update-VMCredential, and off by default: VMAccess can restore
+        sshd configuration to its default and undo hardening on a baselined host.
+
+    .PARAMETER TriggeredBy
+        Who or what asked for this run - a runbook job id, a person, a change ticket.
+        Recorded on every record the run produces, and never interpreted.
 
     .PARAMETER SecretNameTemplate
         How secret names are built from {vm}, {user}, {rg} and {kind}. Change it to fit a

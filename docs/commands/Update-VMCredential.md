@@ -35,15 +35,15 @@ Update-VMCredential [-VaultName] <string> [-VM] <Object> [-CredentialType] <stri
 
 | Name | Type | Required | Pipeline | Default | Description |
 |---|---|---|---|---|---|
-| `-VaultName` | String | yes | no |  |  |
-| `-VM` | Object | yes | no |  |  |
-| `-CredentialType` | String | yes | no |  |  |
-| `-ValidityDays` | Int32 | no | no | 90 |  |
-| `-TriggerReason` | String | no | no | Expiry |  |
-| `-TriggeredBy` | String | no | no |  |  |
+| `-VaultName` | String | yes | no |  | The Key Vault the new value is written to. Written before the machine is touched, which is the whole point of the order above. |
+| `-VM` | Object | yes | no |  | The machine to change, as an object from Get-AzVM. One machine, not a list: the fan-out belongs to Invoke-CredentialRotation. |
+| `-CredentialType` | String | yes | no |  | Password for the local administrator account, or SSHKey for a new key pair on a Linux machine. One credential per call, so a machine with both is two calls. |
+| `-ValidityDays` | Int32 | no | no | 90 | How far ahead the new secret's expiry date is set. That date is the only thing that brings the credential back for rotation, so it is the rotation interval in everything but name. Note that a STIG-hardened Linux image enforces a shorter maximum password age than the ninety-day default. |
+| `-TriggerReason` | String | no | no | Expiry | Why this rotation is happening, recorded on the run. Get-RotationCandidate works it out; pass it through rather than inventing one, or the audit trail stops matching what actually drove the change. |
+| `-TriggeredBy` | String | no | no |  | Who or what asked for it - a runbook job id, a person, a change ticket. Free text, recorded verbatim, never interpreted. |
 | `-RemovePriorSshKeys` | SwitchParameter | no | no |  | Defaults to false, deliberately. The VMAccess extension can wipe every entry in authorized_keys, which takes out colleagues, configuration management and backup agents along with the key you meant to replace. Turn it on only if you are certain this tool owns every key on the machine. |
 | `-ResetSshConfiguration` | SwitchParameter | no | no |  | Defaults to false, deliberately. VMAccess can restore sshd configuration to its default, which silently undoes hardening on a CIS-baselined host. |
-| `-SecretNameTemplate` | String | no | no | {vm}-{user}-{kind} |  |
+| `-SecretNameTemplate` | String | no | no | {vm}-{user}-{kind} | How the secret name is built from {vm}, {user}, {rg} and {kind}. Must match what was used when the secret was written, or this call stages a new secret beside the real one instead of replacing it. |
 
 Supports `-WhatIf` and `-Confirm`.
 
@@ -52,8 +52,31 @@ Supports `-WhatIf` and `-Confirm`.
 ### Example 1
 
 ```powershell
-
+$vm = Get-AzVM -ResourceGroupName rg-dmz -Name jump-01
+Update-VMCredential -VaultName kv-creds -VM $vm -CredentialType Password -WhatIf
 ```
+
+What one rotation would do, without doing it. ShouldProcess is asked per
+credential, so a dry run over a fleet still reports every machine separately.
+
+### Example 2
+
+```powershell
+$vm = Get-AzVM -ResourceGroupName rg-dmz -Name jump-01
+Update-VMCredential -VaultName kv-creds -VM $vm -CredentialType Password -Confirm:$false
+```
+
+Replaces the local administrator password now and stores it with the default
+ninety-day expiry. ConfirmImpact is High, so without -Confirm:$false this prompts.
+
+### Example 3
+
+```powershell
+Update-VMCredential -VaultName kv-creds -VM $linuxVm -CredentialType SSHKey -TriggerReason Access -TriggeredBy 'runbook:8f2c' -Confirm:$false
+```
+
+A key replaced because somebody read the old one. The reason and the caller are
+recorded on the run; they change nothing about how the rotation is performed.
 
 ## Output
 

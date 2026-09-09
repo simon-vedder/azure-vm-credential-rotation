@@ -83,6 +83,10 @@ function Format-Cell {
 
 $pages = @{}
 $sitePages = @{}
+# An undocumented parameter and a missing example both render as a hole on the published page -
+# an empty table cell, or a code block with nothing in it. Neither breaks the build, so both stay
+# broken until somebody reads the site. Collected here and reported at the end instead.
+$gaps = [System.Collections.Generic.List[string]]::new()
 
 # The runbook wrapper is what Azure Automation runs, so it gets a page from its own help just like
 # the commands do. Get-Help on a .ps1 returns the same shape as for a function.
@@ -147,6 +151,7 @@ foreach ($command in $documented) {
             $default = Format-Cell ([string]$parameter.defaultValue)
             if ($default -in '', 'None', 'False') { $default = '' }
             $text = Format-Cell (Format-HelpText $parameter.description)
+            if (-not $text) { $gaps.Add("$name -$($parameter.name): no description") }
             $lines.Add("| ``-$($parameter.name)`` | $type | $required | $pipeline | $default | $text |")
         }
     }
@@ -161,7 +166,8 @@ foreach ($command in $documented) {
         $lines.Add('')
     }
 
-    $examples = @($help.examples.example)
+    $examples = @($help.examples.example | Where-Object { $_ -and (Format-HelpText $_.code) })
+    if (-not $examples.Count) { $gaps.Add("$name`: no examples") }
     if ($examples.Count) {
         $lines.Add('## Examples')
         $lines.Add('')
@@ -280,8 +286,14 @@ $pages['README.md'] = ($index -join "`n").TrimEnd() + "`n"
 # ---- write or check ----------------------------------------------------------------------------
 $target = Join-Path $repoRoot 'docs' 'commands'
 
+if ($gaps.Count) {
+    Write-Warning "The published reference would have $($gaps.Count) hole(s):"
+    $gaps | ForEach-Object { Write-Warning "  $_" }
+}
+
 if ($Check) {
     $problems = [System.Collections.Generic.List[string]]::new()
+    foreach ($gap in $gaps) { $problems.Add("undocumented: $gap") }
     foreach ($name in ($pages.Keys | Sort-Object)) {
         $path = Join-Path $target $name
         if (-not (Test-Path -Path $path)) { $problems.Add("missing: docs/commands/$name"); continue }
@@ -293,7 +305,7 @@ if ($Check) {
     }
     if ($problems.Count) {
         $problems | ForEach-Object { Write-Warning $_ }
-        throw "The command reference is not current. Run ./tools/New-CommandReference.ps1 and commit the result."
+        throw "The command reference is not current, or has undocumented parameters. Fix the comment-based help, run ./tools/New-CommandReference.ps1 and commit the result."
     }
     "The command reference matches the help of $($commands.Count) command(s)."
     return
