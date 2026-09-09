@@ -124,11 +124,12 @@
     permission error rather than an empty result.
 
 .NOTES
-    Requires the automation account's managed identity to hold:
-      Key Vault Secrets Officer   on the vault
-      Virtual Machine Contributor on the VM scopes
-      Log Analytics Reader        on the workspace   (only for access-driven rotation)
-      Monitoring Metrics Publisher on the DCR        (only for audit records)
+    RequiredPermissions: the automation account's system-assigned identity needs Key Vault Secrets
+    Officer on the vault, Virtual Machine Contributor on the VM scopes, and Automation Job Operator
+    on the automation account itself. Access-driven rotation adds Log Analytics Reader on the
+    workspace; the audit trail adds Monitoring Metrics Publisher on the data collection rule. The
+    deployment assigns all of them, so running it needs the right to create role assignments in
+    every scope you name.
 #>
 [CmdletBinding()]
 param(
@@ -855,6 +856,10 @@ function Get-RotationCandidate {
         Dry inspection before a first run over an estate. Nothing is changed by asking,
         so this is the cheapest way to see how much work the next rotation would be.
 
+    .NOTES
+        RequiredPermissions: Key Vault Secrets User on the vault. This function only reads secret
+        metadata to decide what is due; it never writes and never touches a VM.
+
     .OUTPUTS
         PSCustomObject with VM, CredentialType, Reason, SecretName, ExpiresOn.
     #>
@@ -1071,6 +1076,12 @@ function Invoke-CredentialRotation {
         the expiry date gets a vote are two separate questions, so they are two separate
         parameters.
 
+    .NOTES
+        RequiredPermissions: Key Vault Secrets Officer on the vault, and Virtual Machine Contributor
+        on each machine or its resource group. Virtual Machine Contributor is the one to think about:
+        it includes installing extensions, which is code execution as SYSTEM or root on every machine
+        in scope, so assign it per resource group rather than per subscription.
+
     .OUTPUTS
         PSCustomObject summarising the run. Records holds one entry per credential touched,
         in the shape CredentialRotation_CL expects, for whoever wants to ship them.
@@ -1263,6 +1274,11 @@ function Register-CredentialAccess {
         Whatever produced $reads - the KQL in queries/, a SIEM export, a ticket - as
         long as each object carries SecretName and AccessedBy.
 
+    .NOTES
+        RequiredPermissions: Key Vault Secrets Officer on the vault. Only the expiry date is written;
+        the value is never read, which is what keeps this function out of its own audit trail. No VM
+        permission at all - it does not touch machines.
+
     .OUTPUTS
         PSCustomObject per secret, saying whether its expiry was moved.
     #>
@@ -1425,6 +1441,11 @@ function Update-VMCredential {
 
         A key replaced because somebody read the old one. The reason and the caller are
         recorded on the run; they change nothing about how the rotation is performed.
+
+    .NOTES
+        RequiredPermissions: Key Vault Secrets Officer on the vault, and Virtual Machine Contributor
+        on the machine. The VM permission is needed because the new credential is applied through the
+        VMAccess extension, which means extension installation rights on that machine.
 
     .OUTPUTS
         PSCustomObject describing the outcome.

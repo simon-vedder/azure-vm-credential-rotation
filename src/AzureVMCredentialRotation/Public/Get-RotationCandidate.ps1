@@ -65,6 +65,10 @@ function Get-RotationCandidate {
         Dry inspection before a first run over an estate. Nothing is changed by asking,
         so this is the cheapest way to see how much work the next rotation would be.
 
+    .NOTES
+        RequiredPermissions: Key Vault Secrets User on the vault. This function only reads secret
+        metadata to decide what is due; it never writes and never touches a VM.
+
     .OUTPUTS
         PSCustomObject with VM, CredentialType, Reason, SecretName, ExpiresOn.
     #>

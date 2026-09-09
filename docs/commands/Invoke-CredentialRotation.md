@@ -25,6 +25,13 @@ Invoke-CredentialRotation -VaultName <string> -VMName <string> [-ResourceGroupNa
 Invoke-CredentialRotation -VaultName <string> -VM <Object[]> [-OnlyIfDue] [-ThresholdDays <int>] [-ValidityDays <int>] [-SkipSshKeys] [-RemovePriorSshKeys] [-ResetSshConfiguration] [-SecretNameTemplate <string>] [-TriggeredBy <string>] [-WhatIf] [-Confirm] [<CommonParameters>]
 ```
 
+## Requirements and notes
+
+RequiredPermissions: Key Vault Secrets Officer on the vault, and Virtual Machine Contributor
+on each machine or its resource group. Virtual Machine Contributor is the one to think about:
+it includes installing extensions, which is code execution as SYSTEM or root on every machine
+in scope, so assign it per resource group rather than per subscription.
+
 ## Parameters
 
 | Name | Type | Required | Pipeline | Default | Description |

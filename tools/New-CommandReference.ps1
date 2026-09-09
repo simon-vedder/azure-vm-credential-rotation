@@ -81,6 +81,38 @@ function Format-Cell {
     return (($Text -replace '\s*\n\s*', ' ') -replace '\|', '\|').Trim()
 }
 
+# The .NOTES block is "Label: value" with indented continuation lines. Rendered as-is it is a grey
+# wall; as a table the permissions line is something a reader can find. The site's node sync does
+# this for the other tool, so doing it here keeps every command page looking the same.
+$notesDrop = @('Author', 'Version', 'Created', 'LastModified')
+$notesRename = @{ RequiredPermissions = 'Permissions' }
+function ConvertTo-RequirementsTable {
+    param([string[]]$Lines)
+
+    $rows = [System.Collections.Generic.List[object]]::new()
+    foreach ($line in $Lines) {
+        $start = [regex]::Match($line, '^([A-Za-z][A-Za-z ]*?):\s+(.*)$')
+        if ($start.Success) {
+            $rows.Add([pscustomobject]@{ Label = $start.Groups[1].Value.Trim(); Parts = [System.Collections.Generic.List[string]]@($start.Groups[2].Value.Trim()) })
+        }
+        elseif ($rows.Count -and $line.Trim()) {
+            $rows[$rows.Count - 1].Parts.Add($line.Trim())
+        }
+    }
+    if (-not $rows.Count) { return $null }
+
+    $out = [System.Collections.Generic.List[string]]::new()
+    $out.Add('| | |')
+    $out.Add('|---|---|')
+    foreach ($row in $rows) {
+        if ($row.Label -in $notesDrop) { continue }
+        $label = if ($notesRename.ContainsKey($row.Label)) { $notesRename[$row.Label] } else { $row.Label }
+        $out.Add("| **$label** | $(Format-Cell ($row.Parts -join ' ')) |")
+    }
+    if ($out.Count -le 2) { return $null }
+    return $out
+}
+
 $pages = @{}
 $sitePages = @{}
 # An undocumented parameter and a missing example both render as a hole on the published page -
@@ -131,6 +163,7 @@ foreach ($command in $documented) {
     $lines.Add('')
 
     $notes = Format-HelpText $help.alertSet.alert
+    if ($notes -notmatch 'RequiredPermissions\s*:') { $gaps.Add("$name`: no RequiredPermissions in .NOTES") }
     if ($notes) {
         $lines.Add('## Requirements and notes')
         $lines.Add('')
@@ -207,11 +240,31 @@ foreach ($command in $documented) {
     $body = [System.Collections.Generic.List[string]]::new()
     if ($description) { $body.Add($description); $body.Add('') }
     $started = $false
+    $inNotes = $false
+    $noteLines = [System.Collections.Generic.List[string]]::new()
     foreach ($line in $lines) {
         if ($line -eq '## Syntax') { $started = $true }
         if (-not $started) { continue }
         if ($line -eq '---') { break }
-        $body.Add(($line -replace '^## Requirements and notes$', '## Requirements'))
+        if ($line -eq '## Requirements and notes') {
+            $body.Add('## Requirements'); $body.Add('')
+            $inNotes = $true; $noteLines.Clear(); continue
+        }
+        if ($inNotes) {
+            if ($line.StartsWith('## ')) {
+                $table = ConvertTo-RequirementsTable -Lines $noteLines
+                if ($table) { $table | ForEach-Object { $body.Add($_) } } else { $noteLines | ForEach-Object { $body.Add($_) } }
+                $body.Add(''); $inNotes = $false; $body.Add($line); continue
+            }
+            foreach ($noteLine in ($line -split "`r?`n")) { $noteLines.Add($noteLine) }
+            continue
+        }
+        $body.Add($line)
+    }
+    if ($inNotes) {
+        $table = ConvertTo-RequirementsTable -Lines $noteLines
+        if ($table) { $table | ForEach-Object { $body.Add($_) } } else { $noteLines | ForEach-Object { $body.Add($_) } }
+        $body.Add('')
     }
     # Read before write, and sign in before either: the order someone works in, not the alphabet.
     $verbRank = @{ Connect = 1; Test = 2; Get = 3; Export = 4; Show = 5; Start = 6; Invoke = 7; Complete = 8; Set = 9; New = 10; Add = 11; Update = 12; Remove = 13; Restore = 14; Disconnect = 15 }

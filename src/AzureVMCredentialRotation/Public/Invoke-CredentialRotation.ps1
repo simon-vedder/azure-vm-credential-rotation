@@ -98,6 +98,12 @@ function Invoke-CredentialRotation {
         the expiry date gets a vote are two separate questions, so they are two separate
         parameters.
 
+    .NOTES
+        RequiredPermissions: Key Vault Secrets Officer on the vault, and Virtual Machine Contributor
+        on each machine or its resource group. Virtual Machine Contributor is the one to think about:
+        it includes installing extensions, which is code execution as SYSTEM or root on every machine
+        in scope, so assign it per resource group rather than per subscription.
+
     .OUTPUTS
         PSCustomObject summarising the run. Records holds one entry per credential touched,
         in the shape CredentialRotation_CL expects, for whoever wants to ship them.
