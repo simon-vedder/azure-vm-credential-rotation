@@ -95,7 +95,11 @@ function ConvertTo-RequirementsTable {
         if ($start.Success) {
             $rows.Add([pscustomobject]@{ Label = $start.Groups[1].Value.Trim(); Parts = [System.Collections.Generic.List[string]]@($start.Groups[2].Value.Trim()) })
         }
-        elseif ($rows.Count -and $line.Trim()) {
+        elseif ($line.Trim()) {
+            # A line before the first label belongs to no row, and a table has nowhere to put it.
+            # A .NOTES block written as prose is not a label list, so it stays prose rather than
+            # losing its opening paragraph on the way to the site.
+            if (-not $rows.Count) { return $null }
             $rows[$rows.Count - 1].Parts.Add($line.Trim())
         }
     }
