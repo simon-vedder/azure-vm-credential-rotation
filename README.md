@@ -227,7 +227,8 @@ Worth knowing before you run it, not after:
   extensions — effectively code execution as SYSTEM or root in scope. Scope it to
   resource groups, not subscriptions.
 
-Full analysis in [docs/threat-model.md](docs/threat-model.md).
+Full analysis in [docs/threat-model.md](docs/threat-model.md). What the tool reads and writes,
+tag by tag, is in [docs/reference.md](docs/reference.md).
 
 ---
 
